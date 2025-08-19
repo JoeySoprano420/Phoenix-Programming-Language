@@ -1,0 +1,6 @@
+capsule Main {
+    fn main(): int {
+        log("🔥 Phoenix capsule ignition successful.");
+        return 0;
+    }
+}
