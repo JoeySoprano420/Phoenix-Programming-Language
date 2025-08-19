@@ -465,6 +465,19 @@ capsule PhoenixCompiler {
             return c;
         }
         
+        priv fn read_file(file_path: &str) -> Result<String, &'static str> {
+            let mut file = match File::open(file_path) {
+                Ok(file) => file,
+                Err(_) => return Err("Failed to open file"),
+            };
+            
+            let mut contents = String::new();
+            match file.read_to_string(&mut contents) {
+                Ok(_) => Ok(contents),
+                Err(_) => Err("Failed to read file"),
+            }
+        }
+        
         priv fn peek() -> char {
             if (self.at_end()) return '\0';
             return self.source.char_at(self.position);
@@ -1620,9 +1633,12 @@ capsule PhoenixCompiler {
             }
             
             // Visit function epilogue
-            self.visit_function_epilog
-
-                    priv fn visit_function_epilogue(node: ref ASTNode) -> void {
+            self.visit_function_epilogue(node);
+            
+            return function_type;
+        }
+        
+        priv fn visit_function_epilogue(node: ref ASTNode) -> void {
             let func_name = node.value.as_string();
             let return_type = node.metadata.get("return_type").unwrap_or("void");
             
@@ -2994,3 +3010,2102 @@ module PhoenixCompiler {
         struct UltimateCodeGenerator {
         private assembly: Vec<string>;
         private optimization_level: int;
+
+// This could be written in Phoenix using your existing infrastructure:
+capsule PhoenixBootstrap {
+    fn compile_phoenix_source(source: string) -> ExecutableResult {
+        let tokens = tokenize(source);
+        let ast = parse(tokens);
+        let analyzed = semantic_analysis(ast);
+        return execute(analyzed);
+    }
+    
+    fn main() -> int {
+        let compiler_source = read_file("Phoenix_ProLang_Compiler.phx");
+        let result = compile_phoenix_source(compiler_source);
+        return result;
+    }
+}
+
+// Add this to your SupremeLexer
+struct CompilerError {
+    pub message: string;
+    pub line: int;
+    pub column: int;
+    
+    pub fn new(message: string, line: int, column: int) -> CompilerError {
+        return CompilerError {
+            message: message,
+            line: line,
+            column: column
+        };
+    }
+}
+
+// Add these methods to SupremeParser
+priv fn parse_metadata_annotations() -> Map<string, any> {
+    let mut metadata = Map::new();
+    
+    while (self.match(TokenType::AT)) {
+        let name = self.consume(TokenType::IDENTIFIER, "Expected annotation name").value;
+        
+        if (self.match(TokenType::LPAREN)) {
+            let mut args = Vec::new();
+            
+            if (!self.check(TokenType::RPAREN)) {
+                loop {
+                    if (self.check(TokenType::STRING_LITERAL) || 
+                        self.check(TokenType::INT_LITERAL) || 
+                        self.check(TokenType::FLOAT_LITERAL) ||
+                        self.check(TokenType::BOOL_LITERAL)) {
+                        args.push(self.advance().value);
+                    } else {
+                        args.push(self.consume(TokenType::IDENTIFIER, "Expected argument").value);
+                    }
+                    
+                    if (!self.match(TokenType::COMMA)) break;
+                }
+            }
+            
+            self.consume(TokenType::RPAREN, "Expected ')'");
+            metadata.insert(name, args.to_any());
+        } else {
+            metadata.insert(name, true.to_any());
+        }
+    }
+    
+    return metadata;
+}
+
+priv fn has_function_annotations() -> bool {
+    return self.check(TokenType::CONSTEXPR) || self.check(TokenType::PURE) || 
+           self.check(TokenType::NOEXCEPT) || self.check(TokenType::INLINE) || 
+           self.check(TokenType::STATIC) || self.check(TokenType::UNSAFE);
+}
+
+priv fn check_assignment_op() -> bool {
+    return self.check(TokenType::PLUS_ASSIGN) || self.check(TokenType::MINUS_ASSIGN) ||
+           self.check(TokenType::MUL_ASSIGN) || self.check(TokenType::DIV_ASSIGN);
+}
+
+priv fn parse_type_expression() -> string {
+    if (self.match(TokenType::LBRACK)) {
+        // Array type [T; N] or slice type [T]
+        let element_type = self.parse_type_expression();
+        
+        if (self.match(TokenType::SEMICOLON)) {
+            let _size = self.parse_expression(); // Array size
+            self.consume(TokenType::RBRACK, "Expected ']'");
+            return format!("[{}; N]", element_type);
+        } else {
+            self.consume(TokenType::RBRACK, "Expected ']'");
+            return format!("[{}]", element_type);
+        }
+    } else if (self.check(TokenType::IDENTIFIER)) {
+        let type_name = self.advance().value;
+        
+        // Handle generic types
+        if (self.match(TokenType::LT)) {
+            let mut generics = Vec::new();
+            
+            loop {
+                generics.push(self.parse_type_expression());
+                if (!self.match(TokenType::COMMA)) break;
+            }
+            
+            self.consume(TokenType::GT, "Expected '>'");
+            return format!("{}<{}>", type_name, generics.join(", "));
+        }
+        
+        return type_name;
+    } else {
+        throw CompilerError::new("Expected type expression", self.current_token().line, self.current_token().column);
+    }
+}
+
+// Add these to SupremeParser
+priv fn parse_import() -> ASTNode {
+    self.consume(TokenType::IMPORT, "Expected 'import'");
+    let mut module_name = self.consume(TokenType::IDENTIFIER, "Expected module name").value;
+    
+    // Handle nested imports (Module::SubModule)
+    while (self.match(TokenType::DOUBLE_COLON)) {
+        module_name += "::" + self.consume(TokenType::IDENTIFIER, "Expected module name").value;
+    }
+    
+    let mut alias = "";
+    if (self.match(TokenType::AS)) {
+        alias = self.consume(TokenType::IDENTIFIER, "Expected alias name").value;
+    }
+    
+    self.consume(TokenType::SEMICOLON, "Expected ';'");
+    
+    return ASTNode {
+        kind: NodeKind::IMPORT,
+        value: module_name.to_any(),
+        children: Vec::new(),
+        metadata: Map::from([("module", module_name.to_any()), ("alias", alias.to_any())]),
+        source_location: self.current_location()
+    };
+}
+
+priv fn parse_export() -> ASTNode {
+    self.consume(TokenType::EXPORT, "Expected 'export'");
+    
+    if (self.check(TokenType::FN)) {
+        let mut func = self.parse_function();
+        func.metadata.insert("exported", true.to_any());
+        return func;
+    } else if (self.check(TokenType::LET)) {
+        let mut var = self.parse_global_variable();
+        var.metadata.insert("exported", true.to_any());
+        return var;
+    } else if (self.check(TokenType::STRUCT) || self.check(TokenType::ENUM) || self.check(TokenType::TRAIT)) {
+        let mut item = if (self.check(TokenType::STRUCT)) {
+            self.parse_struct()
+        } else if (self.check(TokenType::ENUM)) {
+            self.parse_enum()
+        } else {
+            self.parse_trait()
+        };
+        item.metadata.insert("exported", true.to_any());
+        return item;
+    } else {
+        throw CompilerError::new("Expected function, variable, or type after export", self.current_token().line, self.current_token().column);
+    }
+}
+
+priv fn parse_struct() -> ASTNode {
+    self.consume(TokenType::STRUCT, "Expected 'struct'");
+    let name = self.consume(TokenType::IDENTIFIER, "Expected struct name").value;
+    
+    // Parse generics
+    let mut generics = Vec::new();
+    if (self.match(TokenType::LT)) {
+        loop {
+            generics.push(self.consume(TokenType::IDENTIFIER, "Expected generic name").value);
+            if (!self.match(TokenType::COMMA)) break;
+        }
+        self.consume(TokenType::GT, "Expected '>'");
+    }
+    
+    self.consume(TokenType::LBRACE, "Expected '{'");
+    let mut fields = Vec::new();
+    
+    while (!self.check(TokenType::RBRACE) && !self.at_end()) {
+        let mut visibility = "private";
+        if (self.match(TokenType::PUBLIC)) {
+            visibility = "public";
+        } else if (self.match(TokenType::PRIVATE)) {
+            visibility = "private";
+        }
+        
+        let is_mut = self.match(TokenType::MUT);
+        let field_name = self.consume(TokenType::IDENTIFIER, "Expected field name").value;
+        
+        let mut field_type = "auto";
+        if (self.match(TokenType::COLON)) {
+            field_type = self.parse_type_expression();
+        }
+        
+        // Default value
+        let mut default_value = None;
+        if (self.match(TokenType::ASSIGN)) {
+            default_value = Some(self.parse_expression());
+        }
+        
+        self.consume(TokenType::SEMICOLON, "Expected ';'");
+        
+        let field = ASTNode {
+            kind: NodeKind::FIELD,
+            value: field_name.to_any(),
+            children: if let Some(def_val) = default_value { vec![def_val] } else { Vec::new() },
+            metadata: Map::from([
+                ("name", field_name.to_any()),
+                ("type", field_type.to_any()),
+                ("mutable", is_mut.to_any()),
+                ("visibility", visibility.to_any())
+            ]),
+            source_location: self.current_location()
+        };
+        
+        fields.push(field);
+    }
+    
+    self.consume(TokenType::RBRACE, "Expected '}'");
+    
+    return ASTNode {
+        kind: NodeKind::STRUCT,
+        value: name.to_any(),
+        children: fields,
+        metadata: Map::from([
+            ("name", name.to_any()),
+            ("generics", generics.to_any())
+        ]),
+        source_location: self.current_location()
+    };
+}
+
+// Add similar implementations for parse_enum, parse_trait, parse_impl, etc.
+
+// Add these statement parsing methods
+priv fn parse_let_statement() -> ASTNode {
+    self.consume(TokenType::LET, "Expected 'let'");
+    let is_mut = self.match(TokenType::MUT);
+    let name = self.consume(TokenType::IDENTIFIER, "Expected variable name").value;
+    
+    let mut var_type = "auto";
+    if (self.match(TokenType::COLON)) {
+        var_type = self.parse_type_expression();
+    }
+    
+    let mut value = None;
+    if (self.match(TokenType::ASSIGN)) {
+        value = Some(self.parse_expression());
+    }
+    
+    self.consume(TokenType::SEMICOLON, "Expected ';'");
+    
+    return ASTNode {
+        kind: NodeKind::LET_STMT,
+        value: name.to_any(),
+        children: if let Some(val) = value { vec![val] } else { Vec::new() },
+        metadata: Map::from([
+            ("name", name.to_any()),
+            ("type", var_type.to_any()),
+            ("mutable", is_mut.to_any())
+        ]),
+        source_location: self.current_location()
+    };
+}
+
+priv fn parse_if_statement() -> ASTNode {
+    self.consume(TokenType::IF, "Expected 'if'");
+    self.consume(TokenType::LPAREN, "Expected '('");
+    let condition = self.parse_expression();
+    self.consume(TokenType::RPAREN, "Expected ')'");
+    self.consume(TokenType::LBRACE, "Expected '{'");
+    let then_block = self.parse_block();
+    self.consume(TokenType::RBRACE, "Expected '}'");
+    
+    let mut else_block = Vec::new();
+    if (self.match(TokenType::ELSE)) {
+        if (self.check(TokenType::IF)) {
+            else_block.push(self.parse_if_statement());
+        } else {
+            self.consume(TokenType::LBRACE, "Expected '{'");
+            else_block = self.parse_block();
+            self.consume(TokenType::RBRACE, "Expected '}'");
+        }
+    }
+    
+    let mut children = vec![condition];
+    children.extend(then_block);
+    children.extend(else_block);
+    
+    return ASTNode {
+        kind: NodeKind::IF_STMT,
+        value: null.to_any(),
+        children: children,
+        metadata: Map::new(),
+        source_location: self.current_location()
+    };
+}
+
+// Phoenix Execution Engine
+struct PhoenixExecutor {
+    private global_scope: Scope;
+    private call_stack: Vec<string>;
+    private return_value: Option<any>;
+    
+    pub fn new() -> PhoenixExecutor {
+        return PhoenixExecutor {
+            global_scope: Scope::new(),
+            call_stack: Vec::new(),
+            return_value: None
+        };
+    }
+    
+    pub fn execute_program(ast: ref ASTNode) -> int {
+        // First pass: register all capsules and their contents
+        for child in ast.children {
+            if (child.kind == NodeKind::CAPSULE) {
+                self.register_capsule(ref child);
+            }
+        }
+        
+        // Second pass: execute main function if it exists
+        if let Some(main_func) = self.global_scope.find_function("main") {
+            let result = self.execute_function(ref main_func, Vec::new());
+            return result.as_int_or(0);
+        } else {
+            println("⚠️ [Phoenix] No main function found");
+            return 0;
+        }
+    }
+    
+    priv fn register_capsule(capsule: ref ASTNode) -> void {
+        for child in capsule.children {
+            match child.kind {
+                NodeKind::FUNCTION => {
+                    let func_name = child.value.as_string();
+                    self.global_scope.register_function(func_name, child);
+                }
+                NodeKind::STRUCT => {
+                    let struct_name = child.value.as_string();
+                    self.global_scope.register_type(struct_name, child);
+                }
+                // Register other types...
+                _ => {}
+            }
+        }
+    }
+    
+    priv fn execute_function(func: ref ASTNode, args: Vec<any>) -> any {
+        let func_name = func.value.as_string();
+        self.call_stack.push(func_name);
+        
+        // Create function scope and bind parameters
+        let func_scope = Scope::with_parent(ref self.global_scope);
+        
+        // Bind parameters
+        let mut param_index = 0;
+        for child in func.children {
+            if (child.kind == NodeKind::PARAMETER) {
+                let param_name = child.value.as_string();
+                let param_value = if param_index < args.len() {
+                    args[param_index]
+                } else {
+                    null.to_any() // Default value
+                };
+                func_scope.define_variable(param_name, param_value);
+                param_index += 1;
+            }
+        }
+        
+        // Execute function body
+        self.return_value = None;
+        for child in func.children {
+            if (child.kind != NodeKind::PARAMETER && child.kind != NodeKind::GENERIC_PARAM) {
+                self.execute_statement(ref child, ref func_scope);
+                if (self.return_value.is_some()) {
+                    break;
+                }
+            }
+        }
+        
+        self.call_stack.pop();
+        return self.return_value.unwrap_or(null.to_any());
+    }
+    
+    // Add more execution methods...
+}
+
+struct Scope {
+    private variables: Map<string, any>;
+    private functions: Map<string, ASTNode>;
+    private types: Map<string, ASTNode>;
+    private parent: Option<ref Scope>;
+    
+    pub fn new() -> Scope {
+        return Scope {
+            variables: Map::new(),
+            functions: Map::new(),
+            types: Map::new(),
+            parent: None
+        };
+    }
+    
+    pub fn with_parent(parent: ref Scope) -> Scope {
+        return Scope {
+            variables: Map::new(),
+            functions: Map::new(),
+            types: Map::new(),
+            parent: Some(parent)
+        };
+    }
+    
+    pub fn define_variable(name: string, value: any) -> void {
+        self.variables.insert(name, value);
+    }
+    
+    pub fn find_function(name: string) -> Option<ASTNode> {
+        if let Some(func) = self.functions.get(name) {
+            return Some(func.clone());
+        }
+        
+        if let Some(parent) = self.parent {
+            return parent.find_function(name);
+        }
+        
+        return None;
+    }
+    
+    // Add more scope methods...
+}
+
+// Main Phoenix Compiler Driver
+struct PhoenixCompiler {
+    private lexer: SupremeLexer;
+    private parser: SupremeParser;
+    private semantic_analyzer: SemanticAnalyzer;
+    private ir_generator: IRGenerator;
+    private executor: PhoenixExecutor;
+    
+    pub fn new() -> PhoenixCompiler {
+        return PhoenixCompiler {
+            lexer: SupremeLexer::new(""),
+            parser: SupremeParser::new(Vec::new()),
+            semantic_analyzer: SemanticAnalyzer::new(),
+            ir_generator: IRGenerator::new(5), // SUPREME optimization
+            executor: PhoenixExecutor::new()
+        };
+    }
+    
+    pub fn compile_and_run(source_code: string) -> int {
+        println("🚀 [Phoenix] Starting compilation and execution...");
+        
+        try {
+            // Lexical analysis
+            self.lexer = SupremeLexer::new(source_code);
+            let tokens = self.lexer.tokenize();
+            
+            // Parsing
+            self.parser = SupremeParser::new(tokens);
+            let ast = self.parser.parse();
+            
+            // Semantic analysis
+            let errors = self.semantic_analyzer.analyze(ref ast);
+            if (!errors.is_empty()) {
+                for error in errors {
+                    println!("❌ [Semantic] {}", error.message);
+                }
+                return 1;
+            }
+            
+            // IR generation (optional - for optimization)
+            let _ir = self.ir_generator.generate(ref ast);
+            
+            // Execute the program
+            let result = self.executor.execute_program(ref ast);
+            
+            println!("✅ [Phoenix] Program executed successfully, returned: {}", result);
+            return result;
+            
+        } catch (error: CompilerError) {
+            println!("❌ [Phoenix] Error: {}", error.message);
+            return 1;
+        }
+    }
+}
+
+// Main entry point that matches Python version
+pub fn run_phoenix_code(source_code: string) -> int {
+    let compiler = PhoenixCompiler::new();
+    return compiler.compile_and_run(source_code);
+}
+
+pub fn main() -> int {
+    let test_code = """
+    capsule TestBootstrap {
+        fn factorial(n: int) -> int {
+            if (n <= 1) {
+                return 1;
+            } else {
+                return n * factorial(n - 1);
+            }
+        }
+        
+        fn main() -> int {
+            let result = factorial(5);
+            log("Factorial of 5:", result);
+            return result;
+        }
+    }
+    """;
+    
+    println("🔥 Phoenix Self-Hosting Compiler Test");
+    println("=====================================");
+    
+    return run_phoenix_code(test_code);
+}
+
+capsule PhoenixCompilerUltimate {
+    import System::IO as IO;
+    import System::Collections as Collections;
+    import System::Memory as Memory;
+    import System::Threading as Threading;
+    import System::SIMD as SIMD;
+    import System::Cache as Cache;
+    import System::Profiling as Profiling;
+    
+    // ============================================================================
+    // ZERO-COST COMPILE-TIME CONSTANTS AND TYPE SYSTEM
+    // ============================================================================
+    
+    // Compile-time evaluation engine
+    struct CompileTimeEvaluator {
+        private constant_pool: Map<string, any>;
+        private type_cache: Map<string, TypeInfo>;
+        private optimization_hints: Map<string, OptimizationHint>;
+        
+        pub constexpr fn evaluate_at_compile_time<T>(expr: Expression) -> T {
+            // Zero-cost compile-time evaluation
+            return @compile_time_eval(expr);
+        }
+        
+        pub constexpr fn fold_constants(ast: ASTNode) -> ASTNode {
+            return @fold_all_constants(ast);
+        }
+    }
+    
+    // Zero-cost type system with compile-time verification
+    enum TypeKind {
+        PRIMITIVE { size: u64, alignment: u64 },
+        AGGREGATE { fields: Vec<FieldInfo>, size: u64 },
+        FUNCTION { params: Vec<TypeInfo>, return_type: Box<TypeInfo> },
+        GENERIC { constraints: Vec<TraitConstraint> },
+        SIMD { element_type: Box<TypeInfo>, lanes: u32 }
+    }
+    
+    struct TypeInfo {
+        pub kind: TypeKind;
+        pub name: string;
+        pub size: u64;
+        pub alignment: u64;
+        pub is_trivial: bool;
+        pub is_copyable: bool;
+        pub destructor: Option<FunctionSignature>;
+        
+        pub constexpr fn is_zero_sized() -> bool {
+            return self.size == 0;
+        }
+        
+        pub constexpr fn requires_drop() -> bool {
+            return self.destructor.is_some();
+        }
+    }
+    
+    // ============================================================================
+    // ADVANCED TOKEN SYSTEM WITH ZERO-COST ABSTRACTIONS
+    // ============================================================================
+    
+    struct Token {
+        public type: TokenType;
+        public value: string;
+        public line: u32;
+        public column: u32;
+        public metadata: Map<string, any>;
+        
+        // Zero-cost compile-time token classification
+        pub constexpr fn is_literal() -> bool {
+            return match self.type {
+                TokenType::INT_LITERAL | TokenType::FLOAT_LITERAL | 
+                TokenType::STRING_LITERAL | TokenType::CHAR_LITERAL | 
+                TokenType::BOOL_LITERAL => true,
+                _ => false
+            };
+        }
+        
+        pub constexpr fn precedence() -> u8 {
+            return @compile_time_precedence(self.type);
+        }
+    }
+    
+    enum TokenType {
+        // Literals with compile-time size information
+        INT_LITERAL { bits: u8 },
+        FLOAT_LITERAL { precision: FloatPrecision },
+        STRING_LITERAL { encoding: StringEncoding },
+        CHAR_LITERAL { encoding: CharEncoding },
+        BOOL_LITERAL,
+        NULL_LITERAL,
+        
+        // Keywords with optimization hints
+        CAPSULE, IMPORT, EXPORT, AS, FN, LET, MUT,
+        STRUCT, ENUM, UNION, TRAIT, IMPL, FOR, IF, ELSE,
+        WHILE, LOOP, BREAK, CONTINUE, RETURN, YIELD, EXIT,
+        TRY, CATCH, THROW, NEW, DELETE, REF, MOVE, COPY,
+        THREAD, MUTEX, LOCK, UNLOCK, JOIN, ATOMIC, VOLATILE,
+        SYNC, CONSTEXPR, PURE, NOEXCEPT, PUBLIC, PRIVATE,
+        STATIC, INLINE, VIRTUAL, OVERRIDE, FINAL, WHERE,
+        
+        // Advanced optimization keywords
+        LIKELY, UNLIKELY, ASSUME, RESTRICT, VECTORIZE,
+        UNROLL, PREFETCH, ALIGN, PACKED, COLD, HOT,
+        FLATTEN, ALWAYS_INLINE, NEVER_INLINE, TARGET,
+        
+        // SIMD and parallel keywords
+        SIMD, PARALLEL, REDUCE, SCAN, GATHER, SCATTER,
+        
+        // Memory ordering keywords
+        RELAXED, ACQUIRE, RELEASE, ACQ_REL, SEQ_CST,
+        
+        // Operators with associativity and precedence
+        PLUS, MINUS, MULTIPLY, DIVIDE, MODULO,
+        ASSIGN, PLUS_ASSIGN, MINUS_ASSIGN, MUL_ASSIGN, DIV_ASSIGN,
+        EQ, NE, LT, GT, LE, GE, SPACESHIP,
+        AND, OR, NOT, BIT_AND, BIT_OR, BIT_XOR, BIT_NOT,
+        SHL, SHR, INCREMENT, DECREMENT, POWER,
+        
+        // Advanced operators
+        NULLISH_COALESCING, OPTIONAL_CHAINING, PATTERN_MATCH,
+        PIPE, COMPOSE, MAP, FILTER, FOLD,
+        
+        // Delimiters
+        LPAREN, RPAREN, LBRACE, RBRACE, LBRACK, RBRACK,
+        SEMICOLON, COLON, COMMA, DOT, ARROW, DOUBLE_COLON,
+        QUESTION, AT, HASH, DOLLAR, BACKTICK,
+        
+        // Special
+        NEWLINE, WHITESPACE, COMMENT, EOF, MISMATCH, MACRO_EXPANSION
+    }
+    
+    // ============================================================================
+    // ENHANCED AST WITH ZERO-COST OPTIMIZATION METADATA
+    // ============================================================================
+    
+    struct ASTNode {
+        public kind: NodeKind;
+        public value: any;
+        public children: Vec<ASTNode>;
+        public metadata: Map<string, any>;
+        public source_location: SourceLocation;
+        public type_info: Option<TypeInfo>;
+        public optimization_hints: OptimizationFlags;
+        
+        // Zero-cost AST manipulation
+        pub constexpr fn is_constant_expression() -> bool {
+            return self.optimization_hints.contains(OptimizationFlags::CONST_EXPR);
+        }
+        
+        pub constexpr fn can_be_inlined() -> bool {
+            return self.optimization_hints.contains(OptimizationFlags::INLINE_CANDIDATE);
+        }
+        
+        pub constexpr fn is_pure() -> bool {
+            return self.optimization_hints.contains(OptimizationFlags::PURE);
+        }
+    }
+    
+    enum NodeKind {
+        PROGRAM, CAPSULE, FUNCTION, STRUCT, ENUM, TRAIT, IMPL,
+        LET_STMT, ASSIGN_STMT, IF_STMT, WHILE_STMT, FOR_STMT,
+        LOOP_STMT, RETURN_STMT, BREAK_STMT, CONTINUE_STMT,
+        TRY_STMT, THROW_STMT, EXPR_STMT, MATCH_STMT,
+        BINARY_EXPR, UNARY_EXPR, CALL_EXPR, MEMBER_EXPR,
+        INDEX_EXPR, LITERAL_EXPR, IDENTIFIER_EXPR,
+        ARRAY_LITERAL, CONSTRUCTOR_EXPR, TERNARY_EXPR,
+        LAMBDA_EXPR, ASYNC_EXPR, AWAIT_EXPR, YIELD_EXPR,
+        
+        // Advanced nodes for optimization
+        SIMD_EXPR, PARALLEL_EXPR, VECTORIZED_LOOP,
+        PREFETCH_HINT, BRANCH_HINT, MEMORY_BARRIER,
+        INTRINSIC_CALL, INLINE_ASSEMBLY, CONST_EVAL
+    }
+    
+    bitflags OptimizationFlags : u64 {
+        CONST_EXPR = 1 << 0,
+        PURE = 1 << 1,
+        INLINE_CANDIDATE = 1 << 2,
+        TAIL_CALL = 1 << 3,
+        VECTORIZABLE = 1 << 4,
+        PARALLELIZABLE = 1 << 5,
+        CACHE_FRIENDLY = 1 << 6,
+        BRANCH_PREDICTABLE = 1 << 7,
+        MEMORY_BOUND = 1 << 8,
+        CPU_BOUND = 1 << 9,
+        IO_BOUND = 1 << 10,
+        HOT_PATH = 1 << 11,
+        COLD_PATH = 1 << 12,
+        LIKELY_BRANCH = 1 << 13,
+        UNLIKELY_BRANCH = 1 << 14
+    }
+    
+    // ============================================================================
+    // ULTIMATE LEXER WITH SIMD AND ZERO-COST ABSTRACTIONS
+    // ============================================================================
+    
+    struct UltimateLexer {
+        private source: string;
+        private position: usize;
+        private line: u32;
+        private column: u32;
+        private tokens: Vec<Token>;
+        private keywords: PerfectHashMap<string, TokenType>;
+        private simd_buffer: SIMD::Vector<u8, 32>;  // AVX2 vectorization
+        
+        pub fn new(source: string) -> UltimateLexer {
+            let mut lexer = UltimateLexer {
+                source: source,
+                position: 0,
+                line: 1,
+                column: 1,
+                tokens: Vec::with_capacity_hint(source.len() / 4),
+                keywords: PerfectHashMap::new(),
+                simd_buffer: SIMD::Vector::zero()
+            };
+            
+            lexer.initialize_keywords_vectorized();
+            return lexer;
+        }
+        
+        @hot @inline
+        priv fn initialize_keywords_vectorized() -> void {
+            // Use SIMD for keyword initialization - zero runtime cost
+            let keyword_data = @compile_time_keyword_table();
+            self.keywords = PerfectHashMap::from_compile_time_data(keyword_data);
+        }
+        
+        @hot @vectorize
+        pub fn tokenize() -> Vec<Token> {
+            // Vectorized tokenization with SIMD
+            while !self.at_end() {
+                self.scan_token_vectorized();
+            }
+            
+            self.add_token(TokenType::EOF, "");
+            return move(self.tokens);
+        }
+        
+        @hot @inline @vectorize
+        priv fn scan_token_vectorized() -> void {
+            let c = self.advance();
+            
+            // Use SIMD for character classification
+            if self.is_whitespace_simd(c) {
+                self.skip_whitespace_vectorized();
+                return;
+            }
+            
+            match c {
+                '\n' => {
+                    self.line += 1;
+                    self.column = 1;
+                }
+                '(' => self.add_token_fast(TokenType::LPAREN, "("),
+                ')' => self.add_token_fast(TokenType::RPAREN, ")"),
+                '{' => self.add_token_fast(TokenType::LBRACE, "{"),
+                '}' => self.add_token_fast(TokenType::RBRACE, "}"),
+                '[' => self.add_token_fast(TokenType::LBRACK, "["),
+                ']' => self.add_token_fast(TokenType::RBRACK, "]"),
+                ';' => self.add_token_fast(TokenType::SEMICOLON, ";"),
+                
+                // Vectorized operator parsing
+                '+' => self.parse_plus_operators(),
+                '-' => self.parse_minus_operators(),
+                '*' => self.parse_multiply_operators(),
+                '/' => self.parse_divide_or_comment(),
+                '=' => self.parse_equality_operators(),
+                '<' => self.parse_less_than_operators(),
+                '>' => self.parse_greater_than_operators(),
+                '&' => self.parse_and_operators(),
+                '|' => self.parse_or_operators(),
+                
+                // SIMD string/number parsing
+                '"' => self.scan_string_simd(),
+                '\'' => self.scan_char_optimized(),
+                '0'..='9' => self.scan_number_simd(),
+                'a'..='z' | 'A'..='Z' | '_' => self.scan_identifier_simd(),
+                
+                _ => self.add_token(TokenType::MISMATCH, c.to_string())
+            }
+        }
+        
+        @hot @vectorize @inline
+        priv fn skip_whitespace_vectorized() -> void {
+            // Use SIMD to skip multiple whitespace characters at once
+            while self.position + 32 <= self.source.len() {
+                let chunk = self.source.as_bytes()[self.position..self.position + 32];
+                let vec = SIMD::Vector::<u8, 32>::from_slice(chunk);
+                let whitespace_mask = vec.is_whitespace_mask();
+                
+                if whitespace_mask.all() {
+                    self.position += 32;
+                    self.column += 32;
+                } else {
+                    let trailing_whitespace = whitespace_mask.trailing_ones();
+                    self.position += trailing_whitespace;
+                    self.column += trailing_whitespace;
+                    break;
+                }
+            }
+            
+            // Handle remaining characters
+            while !self.at_end() && self.peek().is_ascii_whitespace() {
+                self.advance();
+            }
+        }
+        
+        @hot @vectorize
+        priv fn scan_string_simd() -> void {
+            let start_pos = self.position - 1;
+            let mut value = String::with_capacity(64);  // Pre-allocate
+            
+            // Vectorized string scanning
+            while !self.at_end() {
+                let remaining = self.source.len() - self.position;
+                
+                if remaining >= 32 {
+                    let chunk = self.source.as_bytes()[self.position..self.position + 32];
+                    let vec = SIMD::Vector::<u8, 32>::from_slice(chunk);
+                    let quote_mask = vec.eq(SIMD::Vector::splat(b'"'));
+                    let escape_mask = vec.eq(SIMD::Vector::splat(b'\\'));
+                    
+                    if let Some(quote_pos) = quote_mask.first_set() {
+                        // Found closing quote
+                        value.push_str(&self.source[self.position..self.position + quote_pos]);
+                        self.position += quote_pos + 1;
+                        break;
+                    } else if escape_mask.any() {
+                        // Handle escape sequences the traditional way
+                        let escape_pos = escape_mask.first_set().unwrap();
+                        value.push_str(&self.source[self.position..self.position + escape_pos]);
+                        self.position += escape_pos;
+                        self.handle_escape_sequence(&mut value);
+                    } else {
+                        // No special characters, copy the whole chunk
+                        value.push_str(&self.source[self.position..self.position + 32]);
+                        self.position += 32;
+                    }
+                } else {
+                    // Handle remaining characters normally
+                    let c = self.advance();
+                    if c == '"' {
+                        break;
+                    } else if c == '\\' {
+                        self.handle_escape_sequence(&mut value);
+                    } else {
+                        value.push(c);
+                    }
+                }
+            }
+            
+            self.add_token(TokenType::STRING_LITERAL { encoding: StringEncoding::UTF8 }, value);
+        }
+        
+        @hot @vectorize
+        priv fn scan_number_simd() -> void {
+            let start_pos = self.position - 1;
+            let mut is_float = false;
+            
+            // Fast digit scanning with SIMD
+            while self.position + 16 <= self.source.len() {
+                let chunk = self.source.as_bytes()[self.position..self.position + 16];
+                let vec = SIMD::Vector::<u8, 16>::from_slice(chunk);
+                let digit_mask = vec.is_digit_mask();
+                
+                if digit_mask.all() {
+                    self.position += 16;
+                } else {
+                    let digit_count = digit_mask.trailing_ones();
+                    self.position += digit_count;
+                    break;
+                }
+            }
+            
+            // Handle remaining digits and decimal point
+            while !self.at_end() && self.peek().is_ascii_digit() {
+                self.advance();
+            }
+            
+            // Check for decimal part
+            if self.peek() == '.' && self.peek_next().is_ascii_digit() {
+                is_float = true;
+                self.advance(); // consume '.'
+                
+                while !self.at_end() && self.peek().is_ascii_digit() {
+                    self.advance();
+                }
+            }
+            
+            // Check for exponent
+            if self.peek() == 'e' || self.peek() == 'E' {
+                is_float = true;
+                self.advance();
+                
+                if self.peek() == '+' || self.peek() == '-' {
+                    self.advance();
+                }
+                
+                while !self.at_end() && self.peek().is_ascii_digit() {
+                    self.advance();
+                }
+            }
+            
+            let value = &self.source[start_pos..self.position];
+            
+            if is_float {
+                self.add_token(TokenType::FLOAT_LITERAL { precision: FloatPrecision::F64 }, value);
+            } else {
+                self.add_token(TokenType::INT_LITERAL { bits: 64 }, value);
+            }
+        }
+        
+        @hot @vectorize
+        priv fn scan_identifier_simd() -> void {
+            let start_pos = self.position - 1;
+            
+            // Vectorized identifier scanning
+            while self.position + 16 <= self.source.len() {
+                let chunk = self.source.as_bytes()[self.position..self.position + 16];
+                let vec = SIMD::Vector::<u8, 16>::from_slice(chunk);
+                let alnum_mask = vec.is_alnum_or_underscore_mask();
+                
+                if alnum_mask.all() {
+                    self.position += 16;
+                } else {
+                    let valid_count = alnum_mask.trailing_ones();
+                    self.position += valid_count;
+                    break;
+                }
+            }
+            
+            // Handle remaining characters
+            while !self.at_end() && self.is_alphanumeric(self.peek()) {
+                self.advance();
+            }
+            
+            let value = &self.source[start_pos..self.position];
+            
+            // Perfect hash lookup for keywords (zero collisions)
+            let token_type = self.keywords.get(value).unwrap_or(TokenType::IDENTIFIER);
+            
+            if token_type == TokenType::BOOL_LITERAL {
+                self.add_token_with_metadata(token_type, value, Map::from([
+                    ("bool_value", value == "true")
+                ]));
+            } else {
+                self.add_token(token_type, value);
+            }
+        }
+        
+        // Zero-cost operator parsing with perfect branch prediction
+        @hot @inline @likely
+        priv fn parse_plus_operators() -> void {
+            if @likely(self.match('+')) {
+                self.add_token_fast(TokenType::INCREMENT, "++");
+            } else if self.match('=') {
+                self.add_token_fast(TokenType::PLUS_ASSIGN, "+=");
+            } else {
+                self.add_token_fast(TokenType::PLUS, "+");
+            }
+        }
+        
+        @hot @inline
+        priv fn parse_minus_operators() -> void {
+            if self.match('-') {
+                self.add_token_fast(TokenType::DECREMENT, "--");
+            } else if self.match('=') {
+                self.add_token_fast(TokenType::MINUS_ASSIGN, "-=");
+            } else if self.match('>') {
+                self.add_token_fast(TokenType::ARROW, "->");
+            } else {
+                self.add_token_fast(TokenType::MINUS, "-");
+            }
+        }
+        
+        // Optimized helper methods
+        @always_inline
+        priv fn add_token_fast(type: TokenType, value: &str) -> void {
+            // Pre-allocated token to avoid heap allocation
+            self.tokens.push_unchecked(Token {
+                type: type,
+                value: value.to_string(),
+                line: self.line,
+                column: self.column,
+                metadata: Map::empty()
+            });
+        }
+        
+        @always_inline @pure
+        priv fn is_whitespace_simd(c: char) -> bool {
+            // Branchless whitespace detection
+            let b = c as u8;
+            return (b == b' ') | (b == b'\t') | (b == b'\r');
+        }
+        
+        @always_inline @pure
+        priv fn at_end() -> bool {
+            return self.position >= self.source.len();
+        }
+        
+        @always_inline
+        priv fn advance() -> char {
+            let c = self.source.chars().nth(self.position).unwrap_or('\0');
+            self.position += c.len_utf8();
+            self.column += 1;
+            return c;
+        }
+        
+        @always_inline @pure
+        priv fn peek() -> char {
+            if self.at_end() { return '\0'; }
+            return self.source.chars().nth(self.position).unwrap_or('\0');
+        }
+        
+        @always_inline @pure
+        priv fn peek_next() -> char {
+            if self.position + 1 >= self.source.len() { return '\0'; }
+            return self.source.chars().nth(self.position + 1).unwrap_or('\0');
+        }
+    }
+    
+    // ============================================================================
+    // ULTIMATE PARSER WITH ZERO-COST ABSTRACTIONS
+    // ============================================================================
+    
+    struct UltimateParser {
+        private tokens: Vec<Token>;
+        private current: usize;
+        private current_capsule: string;
+        private symbol_table: UltimateSymbolTable;
+        private type_checker: ZeroCostTypeChecker;
+        private optimization_analyzer: OptimizationAnalyzer;
+        
+        pub fn new(tokens: Vec<Token>) -> UltimateParser {
+            return UltimateParser {
+                tokens: tokens,
+                current: 0,
+                current_capsule: String::new(),
+                symbol_table: UltimateSymbolTable::new(),
+                type_checker: ZeroCostTypeChecker::new(),
+                optimization_analyzer: OptimizationAnalyzer::new()
+            };
+        }
+        
+        @hot
+        pub fn parse() -> ASTNode {
+            let program = self.parse_program();
+            
+            // Zero-cost optimization analysis during parsing
+            self.optimization_analyzer.analyze_ast(&program);
+            
+            return program;
+        }
+        
+        @hot
+        priv fn parse_program() -> ASTNode {
+            let mut program = ASTNode {
+                kind: NodeKind::PROGRAM,
+                value: null,
+                children: Vec::with_capacity(16),
+                metadata: Map::new(),
+                source_location: self.current_location(),
+                type_info: None,
+                optimization_hints: OptimizationFlags::empty()
+            };
+            
+            // Parse global imports with compile-time resolution
+            while self.check(TokenType::IMPORT) {
+                let import_node = self.parse_import_with_compile_time_resolution();
+                program.children.push(import_node);
+            }
+            
+            // Parse capsules with optimization hints
+            while !self.at_end() {
+                if self.check(TokenType::CAPSULE) {
+                    let capsule = self.parse_capsule_optimized();
+                    program.children.push(capsule);
+                } else {
+                    throw CompilerError::new("Expected capsule declaration", 
+                        self.current_token().line, self.current_token().column);
+                }
+            }
+            
+            return program;
+        }
+        
+        @hot
+        priv fn parse_capsule_optimized() -> ASTNode {
+            self.consume(TokenType::CAPSULE, "Expected 'capsule'");
+            let name = self.consume(TokenType::IDENTIFIER, "Expected capsule name").value;
+            self.current_capsule = name.clone();
+            
+            let mut capsule = ASTNode {
+                kind: NodeKind::CAPSULE,
+                value: name.clone(),
+                children: Vec::with_capacity(32),
+                metadata: Map::from([("name", name.clone())]),
+                source_location: self.current_location(),
+                type_info: None,
+                optimization_hints: OptimizationFlags::empty()
+            };
+            
+            self.consume(TokenType::LBRACE, "Expected '{'");
+            
+            while !self.check(TokenType::RBRACE) && !self.at_end() {
+                // Parse with optimization hint analysis
+                let metadata = self.parse_metadata_annotations_optimized();
+                
+                let node = if self.check(TokenType::IMPORT) {
+                    self.parse_import_with_compile_time_resolution()
+                } else if self.check(TokenType::EXPORT) {
+                    self.parse_export_optimized()
+                } else if self.check(TokenType::FN) || self.has_function_annotations() {
+                    self.parse_function_with_optimization_analysis()
+                } else if self.check(TokenType::STRUCT) {
+                    self.parse_struct_with_layout_optimization()
+                } else if self.check(TokenType::ENUM) {
+                    self.parse_enum_with_tag_optimization()
+                } else if self.check(TokenType::TRAIT) {
+                    self.parse_trait_with_vtable_optimization()
+                } else if self.check(TokenType::IMPL) {
+                    self.parse_impl_with_specialization()
+                } else if self.check(TokenType::LET) {
+                    self.parse_global_variable_with_const_prop()
+                } else {
+                    throw CompilerError::new("Unexpected token in capsule", 
+                        self.current_token().line, self.current_token().column);
+                };
+                
+                // Apply metadata and optimization hints
+                node.metadata.extend(metadata);
+                capsule.children.push(node);
+            }
+            
+            self.consume(TokenType::RBRACE, "Expected '}'");
+            return capsule;
+        }
+        
+        @hot
+        priv fn parse_function_with_optimization_analysis() -> ASTNode {
+            let mut annotations = Vec::new();
+            let mut opt_hints = OptimizationFlags::empty();
+            
+            // Parse function annotations with zero-cost analysis
+            while self.check_function_annotation() {
+                let annotation = self.advance().value;
+                annotations.push(annotation.clone());
+                
+                // Set optimization hints at compile time
+                opt_hints |= match annotation.as_str() {
+                    "inline" => OptimizationFlags::INLINE_CANDIDATE,
+                    "pure" => OptimizationFlags::PURE,
+                    "const" => OptimizationFlags::CONST_EXPR,
+                    "hot" => OptimizationFlags::HOT_PATH,
+                    "cold" => OptimizationFlags::COLD_PATH,
+                    "vectorize" => OptimizationFlags::VECTORIZABLE,
+                    "parallel" => OptimizationFlags::PARALLELIZABLE,
+                    _ => OptimizationFlags::empty()
+                };
+            }
+            
+            self.consume(TokenType::FN, "Expected 'fn'");
+            let name = self.consume(TokenType::IDENTIFIER, "Expected function name").value;
+            
+            // Parse generics with compile-time specialization
+            let generics = self.parse_generics_with_specialization();
+            
+            // Parse parameters with zero-cost abstractions
+            let params = self.parse_parameters_optimized();
+            
+            // Parse return type with compile-time verification
+            let return_type = if self.match(TokenType::ARROW) {
+                self.parse_type_expression_with_inference()
+            } else {
+                "void".to_string()
+            };
+            
+            // Parse where clause for generic constraints
+            let where_clause = self.parse_where_clause_optimized();
+            
+            // Parse function body with optimization analysis
+            self.consume(TokenType::LBRACE, "Expected '{'");
+            let body = self.parse_block_with_optimization_hints();
+            self.consume(TokenType::RBRACE, "Expected '}'");
+            
+            let mut function = ASTNode {
+                kind: NodeKind::FUNCTION,
+                value: name.clone(),
+                children: Vec::new(),
+                metadata: Map::from([
+                    ("name", name.clone()),
+                    ("return_type", return_type),
+                    ("annotations", annotations)
+                ]),
+                source_location: self.current_location(),
+                type_info: None,
+                optimization_hints: opt_hints
+            };
+            
+            function.children.extend(generics);
+            function.children.extend(params);
+            function.children.extend(where_clause);
+            function.children.extend(body);
+            
+            // Register function with optimization metadata
+            self.symbol_table.register_function_optimized(name, return_type, params, opt_hints);
+            
+            return function;
+        }
+        
+        // Advanced parsing methods with zero-cost optimizations
+        @hot @vectorize
+        priv fn parse_block_with_optimization_hints() -> Vec<ASTNode> {
+            let mut statements = Vec::with_capacity(16);
+            
+            while !self.check(TokenType::RBRACE) && !self.at_end() {
+                let stmt = self.parse_statement_with_analysis();
+                
+                // Apply statement-level optimizations
+                if stmt.optimization_hints.contains(OptimizationFlags::CONST_EXPR) {
+                    // Constant fold at compile time
+                    let folded = self.constant_fold_statement(stmt);
+                    statements.push(folded);
+                } else {
+                    statements.push(stmt);
+                }
+            }
+            
+            return statements;
+        }
+        
+        @hot
+        priv fn parse_expression_with_vectorization() -> ASTNode {
+            let expr = self.parse_ternary_optimized();
+            
+            // Check if expression can be vectorized
+            if self.can_vectorize_expression(&expr) {
+                expr.optimization_hints |= OptimizationFlags::VECTORIZABLE;
+            }
+            
+            return expr;
+        }
+        
+        @always_inline @pure
+        priv fn can_vectorize_expression(expr: &ASTNode) -> bool {
+            match expr.kind {
+                NodeKind::BINARY_EXPR => {
+                    let op = expr.value.as_string();
+                    return matches!(op.as_str(), "+" | "-" | "*" | "/" | "&" | "|" | "^");
+                }
+                NodeKind::CALL_EXPR => {
+                    // Check for vectorizable math functions
+                    return self.is_vectorizable_function(expr);
+                }
+                _ => false
+            }
+        }
+        
+        // Zero-cost compile-time optimizations
+        @constexpr
+        priv fn constant_fold_statement(stmt: ASTNode) -> ASTNode {
+            // Compile-time constant folding
+            return @fold_constants_at_compile_time(stmt);
+        }
+        
+        @constexpr
+        priv fn parse_metadata_annotations_optimized() -> Map<string, any> {
+            let mut metadata = Map::new();
+            
+            while self.match(TokenType::AT) {
+                let name = self.consume(TokenType::IDENTIFIER, "Expected annotation name").value;
+                
+                if self.match(TokenType::LPAREN) {
+                    let args = self.parse_annotation_args_compile_time();
+                    self.consume(TokenType::RPAREN, "Expected ')'");
+                    metadata.insert(name, args);
+                } else {
+                    metadata.insert(name, true);
+                }
+            }
+            
+            return metadata;
+        }
+    }
+    
+    // ============================================================================
+    // ULTIMATE SYMBOL TABLE WITH PERFECT HASHING
+    // ============================================================================
+    
+    struct UltimateSymbolTable {
+        private scopes: Vec<ScopeTable>;
+        private current_scope: usize;
+        private global_constants: PerfectHashMap<string, ConstantValue>;
+        private type_registry: TypeRegistry;
+        
+        pub fn new() -> UltimateSymbolTable {
+            let mut table = UltimateSymbolTable {
+                scopes: Vec::with_capacity(64),
+                current_scope: 0,
+                global_constants: PerfectHashMap::new(),
+                type_registry: TypeRegistry::new()
+            };
+            
+            table.push_scope(); // Global scope
+            return table;
+        }
+        
+        @hot @inline
+        pub fn push_scope() -> void {
+            self.scopes.push(ScopeTable::with_capacity(32));
+            self.current_scope = self.scopes.len() - 1;
+        }
+        
+        @hot @inline
+        pub fn pop_scope() -> void {
+            if self.scopes.len() > 1 {
+                self.scopes.pop();
+                self.current_scope = self.scopes.len() - 1;
+            }
+        }
+        
+        @hot
+        pub fn register_function_optimized(
+            name: string, 
+            return_type: string, 
+            params: Vec<ASTNode>, 
+            hints: OptimizationFlags
+        ) -> void {
+            let signature = FunctionSignature {
+                name: name.clone(),
+                params: params.iter().map(|p| self.extract_param_type(p)).collect(),
+                return_type: self.resolve_type(&return_type),
+                optimization_hints: hints
+            };
+            
+            let symbol = Symbol {
+                name: name.clone(),
+                symbol_type: SymbolType::FUNCTION,
+                type_info: TypeInfo::function(signature),
+                optimization_hints: hints,
+                metadata: Map::new()
+            };
+            
+            self.scopes[self.current_scope].insert_optimized(name, symbol);
+        }
+        
+        @hot @inline
+        pub fn lookup_optimized(name: &str) -> Option<&Symbol> {
+            // Perfect hash lookup with zero collisions
+            for scope in self.scopes.iter().rev() {
+                if let Some(symbol) = scope.get_fast(name) {
+                    return Some(symbol);
+                }
+            }
+            None
+        }
+        
+        @constexpr
+        pub fn register_compile_time_constant(name: string, value: ConstantValue) -> void {
+            self.global_constants.insert(name, value);
+        }
+        
+        @constexpr @pure
+        pub fn get_compile_time_constant(name: &str) -> Option<ConstantValue> {
+            self.global_constants.get(name).cloned()
+        }
+    }
+    
+    struct ScopeTable {
+        // Use perfect hash map for zero-collision lookups
+        symbols: PerfectHashMap<string, Symbol>,
+        // Cache frequently accessed symbols
+        hot_cache: [Option<Symbol>; 8],
+        hot_keys: [string; 8],
+        cache_index: usize,
+    }
+    
+    impl ScopeTable {
+        @hot @inline
+        pub fn insert_optimized(mut self, name: string, symbol: Symbol) -> void {
+            // Cache hot symbols for O(1) access
+            if symbol.optimization_hints.contains(OptimizationFlags::HOT_PATH) {
+                let idx = self.cache_index % 8;
+                self.hot_cache[idx] = Some(symbol.clone());
+                self.hot_keys[idx] = name.clone();
+                self.cache_index += 1;
+            }
+            
+            self.symbols.insert(name, symbol);
+        }
+        
+        @hot @inline
+        pub fn get_fast(self, name: &str) -> Option<&Symbol> {
+            // Check hot cache first
+            for i in 0..8 {
+                if self.hot_keys[i] == name {
+                    return self.hot_cache[i].as_ref();
+                }
+            }
+            
+            // Fall back to hash table
+            self.symbols.get(name)
+        }
+    }
+    
+    // ============================================================================
+    // ZERO-COST TYPE CHECKER WITH COMPILE-TIME VERIFICATION
+    // ============================================================================
+    
+    struct ZeroCostTypeChecker {
+        private type_cache: PerfectHashMap<string, TypeInfo>;
+        private constraint_solver: ConstraintSolver;
+        private inference_engine: TypeInferenceEngine;
+        
+        pub fn new() -> ZeroCostTypeChecker {
+            return ZeroCostTypeChecker {
+                type_cache: PerfectHashMap::new(),
+                constraint_solver: ConstraintSolver::new(),
+                inference_engine: TypeInferenceEngine::new()
+            };
+        }
+        
+        @constexpr
+        pub fn check_types_at_compile_time(ast: &ASTNode) -> Result<(), TypeError> {
+            // All type checking happens at compile time - zero runtime cost
+            return @compile_time_type_check(ast);
+        }
+        
+        @constexpr @pure
+        pub fn infer_type_compile_time(expr: &ASTNode) -> TypeInfo {
+            match expr.kind {
+                NodeKind::LITERAL_EXPR => self.infer_literal_type(expr),
+                NodeKind::BINARY_EXPR => self.infer_binary_type(expr),
+                NodeKind::CALL_EXPR => self.infer_call_type(expr),
+                _ => TypeInfo::unknown()
+            }
+        }
+        
+        @constexpr @pure
+        priv fn infer_literal_type(expr: &ASTNode) -> TypeInfo {
+            match expr.metadata.get("literal_type") {
+                Some("integer") => TypeInfo::primitive(PrimitiveType::I64),
+                Some("float") => TypeInfo::primitive(PrimitiveType::F64),
+                Some("string") => TypeInfo::primitive(PrimitiveType::String),
+                Some("boolean") => TypeInfo::primitive(PrimitiveType::Bool),
+                _ => TypeInfo::unknown()
+            }
+        }
+        
+        @constexpr
+        pub fn verify_generic_constraints(
+            type_args: &[TypeInfo], 
+            constraints: &[TraitConstraint]
+        ) -> bool {
+            // Compile-time constraint verification
+            return @verify_constraints_at_compile_time(type_args, constraints);
+        }
+    }
+    
+    // ============================================================================
+    // ULTIMATE IR GENERATOR WITH VECTORIZATION AND PARALLELIZATION
+    // ============================================================================
+    
+    struct UltimateIRGenerator {
+        private instructions: Vec<IRInstruction>;
+        private temp_counter: AtomicU64;
+        private label_counter: AtomicU64;
+        private optimization_level: u8;
+        private vectorizer: VectorizationEngine;
+        private parallelizer: ParallelizationEngine;
+        
+        pub fn new(optimization_level: u8) -> UltimateIRGenerator {
+            return UltimateIRGenerator {
+                instructions: Vec::with_capacity(1024),
+                temp_counter: AtomicU64::new(0),
+                label_counter: AtomicU64::new(0),
+                optimization_level: optimization_level,
+                vectorizer: VectorizationEngine::new(),
+                parallelizer: ParallelizationEngine::new()
+            };
+        }
+        
+        @hot
+        pub fn generate_ultimate_ir(ast: &ASTNode) -> Vec<IRInstruction> {
+            self.visit_node_optimized(ast);
+            
+            // Apply ultimate optimizations
+            let optimized = self.apply_ultimate_optimizations();
+            
+            // Vectorize suitable operations
+            let vectorized = self.vectorizer.vectorize_ir(optimized);
+            
+            // Parallelize independent operations
+            let parallelized = self.parallelizer.parallelize_ir(vectorized);
+            
+            return parallelized;
+        }
+        
+        @hot @vectorize
+        priv fn apply_ultimate_optimizations() -> Vec<IRInstruction> {
+            let mut ir = self.instructions.clone();
+            
+            for _ in 0..self.optimization_level {
+                ir = self.constant_folding_ultimate(ir);
+                ir = self.dead_code_elimination_ultimate(ir);
+                ir = self.peephole_optimization_ultimate(ir);
+                ir = self.tail_call_optimization_ultimate(ir);
+                ir = self.loop_optimization_ultimate(ir);
+                ir = self.memory_optimization_ultimate(ir);
+                ir = self.branch_optimization_ultimate(ir);
+                ir = self.cache_optimization_ultimate(ir);
+            }
+            
+            return ir;
+        }
+        
+        @hot @vectorize
+        priv fn constant_folding_ultimate(instructions: Vec<IRInstruction>) -> Vec<IRInstruction> {
+            let mut optimized = Vec::with_capacity(instructions.len());
+            let mut constants = PerfectHashMap::new();
+            
+            for instr in instructions {
+                match instr.opcode.as_str() {
+                    "LOAD_CONST" => {
+                        let temp = &instr.args[0];
+                        let value = self.parse_constant(&instr.args[1]);
+                        constants.insert(temp.clone(), value);
+                        optimized.push(instr);
+                    }
+                    
+                    "ADD" | "SUB" | "MUL" | "DIV" | "MOD" => {
+                        if let Some(folded) = self.try_fold_arithmetic(&instr, &constants) {
+                            optimized.push(folded);
+                        } else {
+                            optimized.push(instr);
+                        }
+                    }
+                    
+                    "SIMD_ADD" | "SIMD_MUL" => {
+                        // Vector constant folding
+                        if let Some(folded) = self.try_fold_simd(&instr, &constants) {
+                            optimized.push(folded);
+                        } else {
+                            optimized.push(instr);
+                        }
+                    }
+                    
+                    _ => optimized.push(instr)
+                }
+            }
+            
+            return optimized;
+        }
+        
+        @hot @parallel
+        priv fn loop_optimization_ultimate(instructions: Vec<IRInstruction>) -> Vec<IRInstruction> {
+            let mut optimized = Vec::new();
+            let mut i = 0;
+            
+            while i < instructions.len() {
+                if self.is_loop_start(&instructions[i]) {
+                    let loop_info = self.analyze_loop_ultimate(&instructions, i);
+                    
+                    if loop_info.can_vectorize {
+                        // Replace with vectorized loop
+                        let vectorized = self.vectorize_loop(&loop_info);
+                        optimized.extend(vectorized);
+                        i = loop_info.end_index + 1;
+                    } else if loop_info.can_unroll {
+                        // Unroll small loops
+                        let unrolled = self.unroll_loop_ultimate(&loop_info);
+                        optimized.extend(unrolled);
+                        i = loop_info.end_index + 1;
+                    } else if loop_info.can_parallelize {
+                        // Convert to parallel loop
+                        let parallel = self.parallelize_loop(&loop_info);
+                        optimized.extend(parallel);
+                        i = loop_info.end_index + 1;
+                    } else {
+                        optimized.push(instructions[i]);
+                        i += 1;
+                    }
+                } else {
+                    optimized.push(instructions[i]);
+                    i += 1;
+                }
+            }
+            
+            return optimized;
+        }
+        
+        @hot @inline
+        priv fn vectorize_loop(loop_info: &LoopInfo) -> Vec<IRInstruction> {
+            let mut vectorized = Vec::new();
+            
+            // Generate SIMD prologue
+            vectorized.push(IRInstruction {
+                opcode: "SIMD_LOOP_START".to_string(),
+                args: vec![loop_info.induction_var.clone(), loop_info.vector_width.to_string()],
+                metadata: Map::from([("optimization", "vectorization")]),
+                optimization_level: self.optimization_level as i32
+            });
+            
+            // Vectorize loop body
+            for instr in &loop_info.body {
+                let vectorized_instr = self.vectorize_instruction(instr);
+                vectorized.push(vectorized_instr);
+            }
+            
+            // Generate SIMD epilogue
+            vectorized.push(IRInstruction {
+                opcode: "SIMD_LOOP_END".to_string(),
+                args: vec![loop_info.induction_var.clone()],
+                metadata: Map::from([("optimization", "vectorization")]),
+                optimization_level: self.optimization_level as i32
+            });
+            
+            return vectorized;
+        }
+        
+        @hot @inline
+        priv fn vectorize_instruction(instr: &IRInstruction) -> IRInstruction {
+            match instr.opcode.as_str() {
+                "ADD" => IRInstruction {
+                    opcode: "SIMD_ADD".to_string(),
+                    args: instr.args.clone(),
+                    metadata: Map::from([("vectorized", true), ("vector_width", 8)]),
+                    optimization_level: instr.optimization_level
+                },
+                "MUL" => IRInstruction {
+                    opcode: "SIMD_MUL".to_string(),
+                    args: instr.args.clone(),
+                    metadata: Map::from([("vectorized", true), ("vector_width", 8)]),
+                    optimization_level: instr.optimization_level
+                },
+                "LOAD" => IRInstruction {
+                    opcode: "SIMD_LOAD".to_string(),
+                    args: instr.args.clone(),
+                    metadata: Map::from([("vectorized", true), ("aligned", true)]),
+                    optimization_level: instr.optimization_level
+                },
+                "STORE" => IRInstruction {
+                    opcode: "SIMD_STORE".to_string(),
+                    args: instr.args.clone(),
+                    metadata: Map::from([("vectorized", true), ("aligned", true)]),
+                    optimization_level: instr.optimization_level
+                },
+                _ => instr.clone()
+            }
+        }
+    }
+    
+    // ============================================================================
+    // ULTIMATE CODE GENERATOR WITH MACHINE-SPECIFIC OPTIMIZATIONS
+    // ============================================================================
+    
+    struct UltimateCodeGenerator {
+        private target_info: TargetInfo;
+        private register_allocator: UltimateRegisterAllocator;
+        private instruction_scheduler: InstructionScheduler;
+        private cache_optimizer: CacheOptimizer;
+        private assembly: Vec<string>;
+        
+        pub fn new(target: TargetInfo) -> UltimateCodeGenerator {
+            return UltimateCodeGenerator {
+                target_info: target,
+                register_allocator: UltimateRegisterAllocator::new(&target),
+                instruction_scheduler: InstructionScheduler::new(&target),
+                cache_optimizer: CacheOptimizer::new(),
+                assembly: Vec::with_capacity(4096)
+            };
+        }
+        
+        @hot
+        pub fn generate_ultimate_assembly(ir: Vec<IRInstruction>) -> string {
+            // Schedule instructions for optimal pipeline utilization
+            let scheduled = self.instruction_scheduler.schedule_for_target(ir);
+            
+            // Optimize for cache locality
+            let cache_optimized = self.cache_optimizer.optimize_for_cache(scheduled);
+            
+            // Generate machine code with target-specific optimizations
+            self.generate_prologue_optimized();
+            
+            for instr in cache_optimized {
+                self.generate_instruction_optimized(instr);
+            }
+            
+            self.generate_epilogue_optimized();
+            
+            return self.assembly.join("\n");
+        }
+        
+        @hot @target_specific
+        priv fn generate_instruction_optimized(instr: IRInstruction) -> void {
+            let optimized = instr.metadata.get("optimization").is_some();
+            
+            match instr.opcode.as_str() {
+                "SIMD_ADD" => self.generate_simd_add_optimized(instr),
+                "SIMD_MUL" => self.generate_simd_mul_optimized(instr),
+                "SIMD_LOAD" => self.generate_simd_load_optimized(instr),
+                "SIMD_STORE" => self.generate_simd_store_optimized(instr),
+                
+                "PREFETCH" => self.generate_prefetch_hint(instr),
+                "BRANCH_HINT" => self.generate_branch_hint(instr),
+                "CACHE_LINE_ZERO" => self.generate_cache_line_zero(instr),
+                
+                "PARALLEL_FOR" => self.generate_parallel_for(instr),
+                "ATOMIC_ADD" => self.generate_atomic_add(instr),
+                "MEMORY_FENCE" => self.generate_memory_fence(instr),
+                
+                // Standard operations with target optimizations
+                "ADD" => self.generate_add_optimized(instr),
+                "MUL" => self.generate_mul_optimized(instr),
+                "LOAD" => self.generate_load_optimized(instr),
+                "STORE" => self.generate_store_optimized(instr),
+                "CALL" => self.generate_call_optimized(instr),
+                
+                _ => self.generate_fallback(instr)
+            }
+            
+            if optimized {
+                let opt_type = instr.metadata.get("optimization").unwrap_or("unknown");
+                self.assembly.push(format!("    # Optimized: {}", opt_type));
+            }
+        }
+        
+        @target("avx2") @hot
+        priv fn generate_simd_add_optimized(instr: IRInstruction) -> void {
+            let result = &instr.args[0];
+            let left = &instr.args[1];
+            let right = &instr.args[2];
+            
+            let result_reg = self.register_allocator.allocate_simd_register(result);
+            let left_reg = self.register_allocator.get_simd_register(left);
+            let right_reg = self.register_allocator.get_simd_register(right);
+            
+            // Use AVX2 256-bit SIMD addition
+            match self.target_info.vector_width {
+                256 => {
+                    self.assembly.push(format!("    vpaddd {}, {}, {}    # AVX2 256-bit add", 
+                        result_reg, left_reg, right_reg));
+                }
+                512 => {
+                    self.assembly.push(format!("    vpaddd {}, {}, {}    # AVX-512 add",
+                        result_reg, left_reg, right_reg));
+                }
+                _ => {
+                    self.assembly.push(format!("    paddd {}, {}    # SSE2 128-bit add",
+                        result_reg, right_reg));
+                }
+            }
+        }
+        
+        @target("prefetch") @hot
+        priv fn generate_prefetch_hint(instr: IRInstruction) -> void {
+            let addr = &instr.args[0];
+            let locality = instr.metadata.get("locality").unwrap_or("temporal");
+            
+            match locality {
+                "temporal" => self.assembly.push(format!("    prefetcht0 [{}]", addr)),
+                "nta" => self.assembly.push(format!("    prefetchnta [{}]", addr)),
+                _ => self.assembly.push(format!("    prefetcht2 [{}]", addr))
+            }
+        }
+        
+        @hot @likely
+        priv fn generate_add_optimized(instr: IRInstruction) -> void {
+            let result = &instr.args[0];
+            let left = &instr.args[1];
+            let right = &instr.args[2];
+            
+            let result_reg = self.register_allocator.allocate_register(result);
+            let left_reg = self.register_allocator.get_register(left);
+            let right_reg = self.register_allocator.get_register(right);
+            
+            // Optimize for common patterns
+            if right == "1" {
+                self.assembly.push(format!("    inc {}    # Optimized add by 1", result_reg));
+            } else if right == "0" {
+                if left_reg != result_reg {
+                    self.assembly.push(format!("    mov {}, {}    # Optimized add by 0", 
+                        result_reg, left_reg));
+                }
+            } else if left_reg == result_reg {
+                self.assembly.push(format!("    add {}, {}    # In-place add", result_reg, right_reg));
+            } else {
+                self.assembly.extend(vec![
+                    format!("    mov {}, {}", result_reg, left_reg),
+                    format!("    add {}, {}    # Optimized add", result_reg, right_reg)
+                ]);
+            }
+        }
+        
+        @hot @cache_friendly
+        priv fn generate_load_optimized(instr: IRInstruction) -> void {
+            let dest = &instr.args[0];
+            let addr = &instr.args[1];
+            
+            let dest_reg = self.register_allocator.allocate_register(dest);
+            
+            // Check for alignment and cache optimization hints
+            let aligned = instr.metadata.get("aligned").unwrap_or(false);
+            let prefetch = instr.metadata.get("prefetch").unwrap_or(false);
+            
+            if prefetch {
+                self.assembly.push(format!("    prefetcht0 [{}+64]    # Prefetch next cache line", addr));
+            }
+            
+            if aligned {
+                self.assembly.push(format!("    mov {}, [{}]    # Aligned load", dest_reg, addr));
+            } else {
+                self.assembly.push(format!("    mov {}, [{}]    # Unaligned load", dest_reg, addr));
+            }
+        }
+    }
+    
+    // ============================================================================
+    // ULTIMATE REGISTER ALLOCATOR WITH GRAPH COLORING
+    // ============================================================================
+    
+    struct UltimateRegisterAllocator {
+        private interference_graph: InterferenceGraph;
+        private register_classes: Vec<RegisterClass>;
+        private allocation_map: PerfectHashMap<string, PhysicalRegister>;
+        private spill_slots: Vec<SpillSlot>;
+        private target_info: TargetInfo;
+        
+        pub fn new(target: &TargetInfo) -> UltimateRegisterAllocator {
+            return UltimateRegisterAllocator {
+                interference_graph: InterferenceGraph::new(),
+                register_classes: target.register_classes.clone(),
+                allocation_map: PerfectHashMap::new(),
+                spill_slots: Vec::new(),
+                target_info: target.clone()
+            };
+        }
+        
+        @hot
+        pub fn allocate_with_graph_coloring(live_ranges: &[LiveRange]) -> AllocationResult {
+            // Build interference graph
+            self.build_interference_graph(live_ranges);
+            
+            // Perform graph coloring with spilling
+            let coloring = self.color_graph_optimally();
+            
+            // Generate allocation map
+            self.generate_allocation_map(coloring)
+        }
+        
+        @hot @inline
+        pub fn allocate_simd_register(temp: &str) -> string {
+            if let Some(reg) = self.allocation_map.get(temp) {
+                return reg.to_simd_name();
+            }
+            
+            // Allocate new SIMD register
+            let physical_reg = self.find_free_simd_register();
+            self.allocation_map.insert(temp.to_string(), physical_reg.clone());
+            
+            return physical_reg.to_simd_name();
+        }
+        
+        @hot @inline
+        priv fn find_free_simd_register() -> PhysicalRegister {
+            // Use register classes to find optimal SIMD register
+            for reg_class in &self.register_classes {
+                if reg_class.kind == RegisterKind::SIMD {
+                    for reg in &reg_class.registers {
+                        if !self.is_register_allocated(reg) {
+                            return reg.clone();
+                        }
+                    }
+                }
+            }
+            
+            // Fall back to spilling if no free registers
+            self.spill_least_recently_used_simd()
+        }
+    }
+    
+    // ============================================================================
+    // ADVANCED OPTIMIZATION STRUCTURES
+    // ============================================================================
+    
+    struct LoopInfo {
+        pub start_index: usize,
+        pub end_index: usize,
+        pub induction_var: string,
+        pub body: Vec<IRInstruction>,
+        pub trip_count: Option<u64>,
+        pub can_vectorize: bool,
+        pub can_parallelize: bool,
+        pub can_unroll: bool,
+        pub vector_width: u32,
+        pub dependencies: Vec<Dependency>,
+    }
+    
+    struct VectorizationEngine {
+        private dependency_analyzer: DependencyAnalyzer;
+        private cost_model: VectorizationCostModel;
+        
+        @hot @vectorize
+        pub fn vectorize_ir(ir: Vec<IRInstruction>) -> Vec<IRInstruction> {
+            let mut vectorized = Vec::new();
+            let mut i = 0;
+            
+            while i < ir.len() {
+                let vectorizable_region = self.find_vectorizable_region(&ir, i);
+                
+                if vectorizable_region.is_profitable() {
+                    let vector_code = self.generate_vector_code(&vectorizable_region);
+                    vectorized.extend(vector_code);
+                    i = vectorizable_region.end_index + 1;
+                } else {
+                    vectorized.push(ir[i].clone());
+                    i += 1;
+                }
+            }
+            
+            return vectorized;
+        }
+        
+        @hot
+        priv fn find_vectorizable_region(ir: &[IRInstruction], start: usize) -> VectorizableRegion {
+            let mut region = VectorizableRegion::new(start);
+            
+            for (i, instr) in ir.iter().enumerate().skip(start) {
+                if self.can_vectorize_instruction(instr) && 
+                   !self.has_control_flow_dependency(instr, &region) {
+                    region.add_instruction(i, instr.clone());
+                } else {
+                    break;
+                }
+            }
+            
+            region.analyze_profitability(&self.cost_model);
+            return region;
+        }
+    }
+    
+    struct ParallelizationEngine {
+        private thread_pool_size: usize,
+        private dependency_analyzer: DependencyAnalyzer,
+        
+        @hot @parallel
+        pub fn parallelize_ir(ir: Vec<IRInstruction>) -> Vec<IRInstruction> {
+            let mut parallelized = Vec::new();
+            let mut i = 0;
+            
+            while i < ir.len() {
+                let parallel_region = self.find_parallelizable_region(&ir, i);
+                
+                if parallel_region.is_profitable() {
+                    let parallel_code = self.generate_parallel_code(&parallel_region);
+                    parallelized.extend(parallel_code);
+                    i = parallel_region.end_index + 1;
+                } else {
+                    parallelized.push(ir[i].clone());
+                    i += 1;
+                }
+            }
+            
+            return parallelized;
+        }
+    }
+    
+    // ============================================================================
+    // ZERO-COST ERROR HANDLING
+    // ============================================================================
+    
+    struct CompilerError {
+        pub message: string;
+        pub line: u32;
+        pub column: u32;
+        pub error_code: ErrorCode;
+        pub severity: Severity;
+        pub suggestions: Vec<string>;
+        
+        @constexpr
+        pub fn new(message: string, line: u32, column: u32) -> CompilerError {
+            return CompilerError {
+                message: message,
+                line: line,
+                column: column,
+                error_code: ErrorCode::GENERIC,
+                severity: Severity::ERROR,
+                suggestions: Vec::new()
+            };
+        }
+        
+        @pure @inline
+        pub fn with_suggestion(mut self, suggestion: string) -> CompilerError {
+            self.suggestions.push(suggestion);
+            return self;
+        }
+    }
+    
+    enum ErrorCode : u16 {
+        GENERIC = 0,
+        SYNTAX_ERROR = 1000,
+        TYPE_ERROR = 2000,
+        SEMANTIC_ERROR = 3000,
+        OPTIMIZATION_ERROR = 4000,
+        CODEGEN_ERROR = 5000
+    }
+    
+    enum Severity : u8 {
+        NOTE = 0,
+        WARNING = 1,
+        ERROR = 2,
+        FATAL = 3
+    }
+    
+    // ============================================================================
+    // MAIN COMPILER INTERFACE WITH ULTIMATE OPTIMIZATIONS
+    // ============================================================================
+    
+    @hot
+    pub fn compile_source_ultimate(
+        source: string, 
+        optimization_level: u8,
+        target: TargetInfo
+    ) -> Result<string, Vec<CompilerError>> {
+        @profile_scope("compile_source_ultimate");
+        
+        try {
+            // Phase 1: Lexical analysis with SIMD
+            @profile_scope("lexical_analysis");
+            let mut lexer = UltimateLexer::new(source);
+            let tokens = lexer.tokenize();
+            
+            // Phase 2: Parsing with optimization analysis
+            @profile_scope("parsing");
+            let mut parser = UltimateParser::new(tokens);
+            let ast = parser.parse();
+            
+            // Phase 3: Zero-cost type checking
+            @profile_scope("type_checking");
+            let type_checker = ZeroCostTypeChecker::new
+
+struct GuardianMark {
+    node_id: u32,
+    spirit: string,           // e.g., "Watcher of Syntax"
+    message: string,          // symbolic feedback
+    severity: Severity,
+    glyph: Option<string>,    // visual overlay
+}
+
+if node.is_suspect() {
+    ast.attach_guardian(GuardianMark {
+        node_id: node.id(),
+        spirit: "Watcher of Syntax",
+        message: "This construct bends clarity—consider ritual simplification.",
+        severity: Severity::WARNING,
+        glyph: Some("🜂"),
+    });
+}
+
+trait MutableCapsule {
+    fn mutate(&mut self, context: &MutationContext) -> MutationResult;
+}
+
+let mutator = CapsuleMutator::new(ast);
+let mutated_ast = mutator.apply_mutations(MutationContext {
+    phase: "post-parsing",
+    optimization_level,
+    guardian_feedback: ast.guardian_marks(),
+});
+
+@trace_glyph("🜁", "Lexical winds stir the source")
+let tokens = lexer.tokenize();
+
+pub fn with_guardian(mut self, guardian: GuardianMark) -> CompilerError {
+    self.suggestions.push(guardian.message);
+    return self;
+}
+
+
