@@ -2852,3 +2852,1024 @@ if __name__ == "__main__":
     print("\n🚀💥 ULTIMATE PHOENIX READY!")
     print("Compile and execute code faster than anything in existence!")
     
+# Phoenix Pure Execution Engine - Add to bottom of existing code
+
+class PhoenixValue:
+    """Represents a value in the Phoenix runtime"""
+    
+    def __init__(self, value, phoenix_type, is_mutable=False):
+        self.value = value
+        self.phoenix_type = phoenix_type
+        self.is_mutable = is_mutable
+        self.metadata = {}
+    
+    def __str__(self):
+        return f"PhoenixValue({self.value}, {self.phoenix_type})"
+    
+    def __repr__(self):
+        return self.__str__()
+
+class PhoenixFunction:
+    """Represents a function in the Phoenix runtime"""
+    
+    def __init__(self, name, params, body, return_type, annotations=None, generics=None):
+        self.name = name
+        self.params = params
+        self.body = body
+        self.return_type = return_type
+        self.annotations = annotations or []
+        self.generics = generics or []
+        self.is_pure = "pure" in self.annotations
+        self.is_noexcept = "noexcept" in self.annotations
+        self.is_constexpr = "constexpr" in self.annotations
+
+class PhoenixStruct:
+    """Represents a struct in the Phoenix runtime"""
+    
+    def __init__(self, name, fields, generics=None):
+        self.name = name
+        self.fields = fields
+        self.generics = generics or []
+
+class PhoenixEnum:
+    """Represents an enum in the Phoenix runtime"""
+    
+    def __init__(self, name, variants):
+        self.name = name
+        self.variants = variants
+
+class PhoenixTrait:
+    """Represents a trait in the Phoenix runtime"""
+    
+    def __init__(self, name, methods, generics=None):
+        self.name = name
+        self.methods = methods
+        self.generics = generics or []
+
+class PhoenixScope:
+    """Represents a scope in the Phoenix runtime"""
+    
+    def __init__(self, parent=None):
+        self.parent = parent
+        self.variables = {}
+        self.functions = {}
+        self.types = {}
+        self.traits = {}
+    
+    def define_variable(self, name, value):
+        self.variables[name] = value
+    
+    def get_variable(self, name):
+        if name in self.variables:
+            return self.variables[name]
+        elif self.parent:
+            return self.parent.get_variable(name)
+        else:
+            raise PhoenixException(f"Undefined variable: {name}")
+    
+    def define_function(self, name, func):
+        self.functions[name] = func
+    
+    def get_function(self, name):
+        if name in self.functions:
+            return self.functions[name]
+        elif self.parent:
+            return self.parent.get_function(name)
+        else:
+            raise PhoenixException(f"Undefined function: {name}")
+
+class PhoenixRuntimeError(PhoenixException):
+    """Runtime error in Phoenix execution"""
+    pass
+
+class PhoenixExecutor:
+    """Pure Phoenix code execution engine"""
+    
+    def __init__(self):
+        self.global_scope = PhoenixScope()
+        self.current_scope = self.global_scope
+        self.call_stack = []
+        self.return_value = None
+        self.break_flag = False
+        self.continue_flag = False
+        self.exit_flag = False
+        self.thread_pool = []
+        self.mutex_table = {}
+        
+        # Register built-in functions
+        self._register_builtins()
+    
+    def execute_program(self, ast):
+        """Execute a complete Phoenix program"""
+        print("🔥 [Phoenix Executor] Starting program execution...")
+        
+        try:
+            # First pass: register all capsules and their contents
+            for capsule_name, capsule in ast.get("capsules", {}).items():
+                self._register_capsule(capsule)
+            
+            # Second pass: execute main function if it exists
+            main_func = None
+            for capsule_name, capsule in ast.get("capsules", {}).items():
+                if "main" in capsule.get("functions", {}):
+                    main_func = capsule["functions"]["main"]
+                    break
+            
+            if main_func:
+                result = self._execute_function(main_func, [])
+                print(f"✅ [Phoenix] Program executed successfully, returned: {result}")
+                return result
+            else:
+                print("⚠️ [Phoenix] No main function found")
+                return 0
+                
+        except PhoenixException as e:
+            print(f"❌ [Phoenix] Runtime error: {e}")
+            return 1
+    
+    def _register_capsule(self, capsule):
+        """Register all contents of a capsule"""
+        capsule_name = capsule["name"]
+        
+        # Register functions
+        for func_name, func_def in capsule.get("functions", {}).items():
+            phoenix_func = PhoenixFunction(
+                name=func_name,
+                params=func_def["params"],
+                body=func_def["body"],
+                return_type=func_def["return_type"],
+                annotations=func_def.get("annotations", []),
+                generics=func_def.get("generics", [])
+            )
+            self.global_scope.define_function(func_name, phoenix_func)
+        
+        # Register structs
+        for struct_name, struct_def in capsule.get("structs", {}).items():
+            phoenix_struct = PhoenixStruct(
+                name=struct_name,
+                fields=struct_def["fields"],
+                generics=struct_def.get("generics", [])
+            )
+            self.global_scope.types[struct_name] = phoenix_struct
+        
+        # Register enums
+        for enum_name, enum_def in capsule.get("enums", {}).items():
+            phoenix_enum = PhoenixEnum(
+                name=enum_name,
+                variants=enum_def["variants"]
+            )
+            self.global_scope.types[enum_name] = phoenix_enum
+        
+        # Register traits
+        for trait_name, trait_def in capsule.get("traits", {}).items():
+            phoenix_trait = PhoenixTrait(
+                name=trait_name,
+                methods=trait_def["methods"],
+                generics=trait_def.get("generics", [])
+            )
+            self.global_scope.traits[trait_name] = phoenix_trait
+        
+        # Register global variables
+        for var_name, var_def in capsule.get("globals", {}).items():
+            value = self._evaluate_expression(var_def["value"])
+            phoenix_value = PhoenixValue(
+                value=value,
+                phoenix_type=var_def["type"],
+                is_mutable=var_def["mutable"]
+            )
+            self.global_scope.define_variable(var_name, phoenix_value)
+    
+    def _execute_function(self, func_def, args):
+        """Execute a Phoenix function"""
+        if isinstance(func_def, PhoenixFunction):
+            phoenix_func = func_def
+        else:
+            phoenix_func = PhoenixFunction(
+                name=func_def["name"],
+                params=func_def["params"],
+                body=func_def["body"],
+                return_type=func_def["return_type"],
+                annotations=func_def.get("annotations", [])
+            )
+        
+        # Create new scope for function
+        func_scope = PhoenixScope(self.current_scope)
+        old_scope = self.current_scope
+        self.current_scope = func_scope
+        
+        # Add function to call stack
+        self.call_stack.append(phoenix_func.name)
+        
+        try:
+            # Bind parameters
+            for i, param in enumerate(phoenix_func.params):
+                if i < len(args):
+                    param_value = PhoenixValue(
+                        value=args[i],
+                        phoenix_type=param.get("type", "auto"),
+                        is_mutable=param.get("mutable", False)
+                    )
+                    func_scope.define_variable(param["name"], param_value)
+                else:
+                    # Use default value if available
+                    if "default" in param:
+                        default_val = self._evaluate_expression(param["default"])
+                        param_value = PhoenixValue(
+                            value=default_val,
+                            phoenix_type=param.get("type", "auto"),
+                            is_mutable=param.get("mutable", False)
+                        )
+                        func_scope.define_variable(param["name"], param_value)
+                    else:
+                        raise PhoenixRuntimeError(f"Missing argument for parameter {param['name']}")
+            
+            # Execute function body
+            self.return_value = None
+            for stmt in phoenix_func.body:
+                self._execute_statement(stmt)
+                if self.return_value is not None or self.exit_flag:
+                    break
+            
+            result = self.return_value if self.return_value is not None else None
+            self.return_value = None
+            
+            return result
+            
+        finally:
+            # Restore previous scope
+            self.current_scope = old_scope
+            self.call_stack.pop()
+    
+    def _execute_statement(self, stmt):
+        """Execute a Phoenix statement"""
+        if self.return_value is not None or self.exit_flag:
+            return
+        
+        stmt_kind = stmt["kind"]
+        
+        if stmt_kind == "let":
+            self._execute_let_statement(stmt)
+        elif stmt_kind == "assign":
+            self._execute_assign_statement(stmt)
+        elif stmt_kind == "expr_statement":
+            self._evaluate_expression(stmt["expr"])
+        elif stmt_kind == "if":
+            self._execute_if_statement(stmt)
+        elif stmt_kind == "while":
+            self._execute_while_statement(stmt)
+        elif stmt_kind == "for":
+            self._execute_for_statement(stmt)
+        elif stmt_kind == "loop":
+            self._execute_loop_statement(stmt)
+        elif stmt_kind == "return":
+            self._execute_return_statement(stmt)
+        elif stmt_kind == "break":
+            self.break_flag = True
+        elif stmt_kind == "continue":
+            self.continue_flag = True
+        elif stmt_kind == "try":
+            self._execute_try_statement(stmt)
+        elif stmt_kind == "throw":
+            self._execute_throw_statement(stmt)
+        else:
+            raise PhoenixRuntimeError(f"Unknown statement kind: {stmt_kind}")
+    
+    def _execute_let_statement(self, stmt):
+        """Execute let statement"""
+        name = stmt["name"]
+        is_mutable = stmt["mutable"]
+        
+        if stmt["value"]:
+            value = self._evaluate_expression(stmt["value"])
+        else:
+            value = self._get_default_value(stmt["type"])
+        
+        phoenix_value = PhoenixValue(
+            value=value,
+            phoenix_type=stmt["type"],
+            is_mutable=is_mutable
+        )
+        
+        self.current_scope.define_variable(name, phoenix_value)
+    
+    def _execute_assign_statement(self, stmt):
+        """Execute assignment statement"""
+        target = stmt["target"]
+        value = self._evaluate_expression(stmt["value"])
+        
+        if target["kind"] == "identifier":
+            var_name = target["name"]
+            phoenix_var = self.current_scope.get_variable(var_name)
+            
+            if not phoenix_var.is_mutable:
+                raise PhoenixRuntimeError(f"Cannot assign to immutable variable: {var_name}")
+            
+            phoenix_var.value = value
+        else:
+            raise PhoenixRuntimeError(f"Invalid assignment target: {target['kind']}")
+    
+    def _execute_if_statement(self, stmt):
+        """Execute if statement"""
+        condition = self._evaluate_expression(stmt["condition"])
+        
+        if self._is_truthy(condition):
+            for then_stmt in stmt["then"]:
+                self._execute_statement(then_stmt)
+                if self.return_value is not None or self.break_flag or self.continue_flag:
+                    break
+        elif stmt["else"]:
+            for else_stmt in stmt["else"]:
+                self._execute_statement(else_stmt)
+                if self.return_value is not None or self.break_flag or self.continue_flag:
+                    break
+    
+    def _execute_while_statement(self, stmt):
+        """Execute while loop"""
+        while True:
+            condition = self._evaluate_expression(stmt["condition"])
+            if not self._is_truthy(condition):
+                break
+            
+            self.break_flag = False
+            self.continue_flag = False
+            
+            for body_stmt in stmt["body"]:
+                self._execute_statement(body_stmt)
+                if self.return_value is not None or self.break_flag:
+                    break
+                if self.continue_flag:
+                    break
+            
+            if self.return_value is not None or self.break_flag:
+                break
+        
+        self.break_flag = False
+        self.continue_flag = False
+    
+    def _execute_for_statement(self, stmt):
+        """Execute for loop"""
+        if stmt["kind"] == "for":
+            # C-style for loop
+            if stmt["init"]:
+                if isinstance(stmt["init"], dict) and stmt["init"].get("kind") == "let":
+                    self._execute_let_statement(stmt["init"])
+                else:
+                    self._evaluate_expression(stmt["init"])
+            
+            while True:
+                if stmt["condition"]:
+                    condition = self._evaluate_expression(stmt["condition"])
+                    if not self._is_truthy(condition):
+                        break
+                
+                self.break_flag = False
+                self.continue_flag = False
+                
+                for body_stmt in stmt["body"]:
+                    self._execute_statement(body_stmt)
+                    if self.return_value is not None or self.break_flag:
+                        break
+                    if self.continue_flag:
+                        break
+                
+                if self.return_value is not None or self.break_flag:
+                    break
+                
+                if stmt["update"]:
+                    self._evaluate_expression(stmt["update"])
+        
+        elif stmt["kind"] == "for_in":
+            # for-in loop
+            iterable = self._evaluate_expression(stmt["iterable"])
+            
+            if isinstance(iterable, list):
+                for item in iterable:
+                    phoenix_var = PhoenixValue(item, "auto", True)
+                    self.current_scope.define_variable(stmt["variable"], phoenix_var)
+                    
+                    self.break_flag = False
+                    self.continue_flag = False
+                    
+                    for body_stmt in stmt["body"]:
+                        self._execute_statement(body_stmt)
+                        if self.return_value is not None or self.break_flag:
+                            break
+                        if self.continue_flag:
+                            break
+                    
+                    if self.return_value is not None or self.break_flag:
+                        break
+            else:
+                raise PhoenixRuntimeError(f"Cannot iterate over {type(iterable)}")
+        
+        self.break_flag = False
+        self.continue_flag = False
+    
+    def _execute_loop_statement(self, stmt):
+        """Execute infinite loop"""
+        while True:
+            self.break_flag = False
+            self.continue_flag = False
+            
+            for body_stmt in stmt["body"]:
+                self._execute_statement(body_stmt)
+                if self.return_value is not None or self.break_flag:
+                    break
+                if self.continue_flag:
+                    break
+            
+            if self.return_value is not None or self.break_flag:
+                break
+        
+        self.break_flag = False
+        self.continue_flag = False
+    
+    def _execute_return_statement(self, stmt):
+        """Execute return statement"""
+        if stmt["value"]:
+            self.return_value = self._evaluate_expression(stmt["value"])
+        else:
+            self.return_value = None
+    
+    def _execute_try_statement(self, stmt):
+        """Execute try-catch statement"""
+        try:
+            for try_stmt in stmt["body"]:
+                self._execute_statement(try_stmt)
+                if self.return_value is not None or self.break_flag or self.continue_flag:
+                    break
+        except PhoenixException as e:
+            # Find matching catch clause
+            for catch_clause in stmt["catch"]:
+                if catch_clause["type"] == "Exception" or isinstance(e, PhoenixException):
+                    # Create exception variable in new scope
+                    catch_scope = PhoenixScope(self.current_scope)
+                    old_scope = self.current_scope
+                    self.current_scope = catch_scope
+                    
+                    try:
+                        exception_var = PhoenixValue(str(e), "string", False)
+                        catch_scope.define_variable(catch_clause["variable"], exception_var)
+                        
+                        for catch_stmt in catch_clause["body"]:
+                            self._execute_statement(catch_stmt)
+                            if self.return_value is not None or self.break_flag or self.continue_flag:
+                                break
+                        break
+                    finally:
+                        self.current_scope = old_scope
+    
+    def _execute_throw_statement(self, stmt):
+        """Execute throw statement"""
+        value = self._evaluate_expression(stmt["value"])
+        raise PhoenixException(str(value))
+    
+    def _evaluate_expression(self, expr):
+        """Evaluate a Phoenix expression"""
+        if expr is None:
+            return None
+        
+        expr_kind = expr["kind"]
+        
+        if expr_kind == "int":
+            return expr["value"]
+        elif expr_kind == "float":
+            return expr["value"]
+        elif expr_kind == "bool":
+            return expr["value"]
+        elif expr_kind == "string":
+            return expr["value"]
+        elif expr_kind == "char":
+            return expr["value"]
+        elif expr_kind == "null":
+            return None
+        elif expr_kind == "identifier":
+            phoenix_var = self.current_scope.get_variable(expr["name"])
+            return phoenix_var.value
+        elif expr_kind == "binop":
+            return self._evaluate_binary_operation(expr)
+        elif expr_kind == "unary":
+            return self._evaluate_unary_operation(expr)
+        elif expr_kind == "call":
+            return self._evaluate_function_call(expr)
+        elif expr_kind == "member":
+            return self._evaluate_member_access(expr)
+        elif expr_kind == "index":
+            return self._evaluate_index_access(expr)
+        elif expr_kind == "array_literal":
+            return [self._evaluate_expression(elem) for elem in expr["elements"]]
+        elif expr_kind == "ternary":
+            return self._evaluate_ternary_expression(expr)
+        elif expr_kind == "constructor":
+            return self._evaluate_constructor(expr)
+        else:
+            raise PhoenixRuntimeError(f"Unknown expression kind: {expr_kind}")
+    
+    def _evaluate_binary_operation(self, expr):
+        """Evaluate binary operation"""
+        left = self._evaluate_expression(expr["left"])
+        right = self._evaluate_expression(expr["right"])
+        op = expr["operator"]
+        
+        if op == "+":
+            return left + right
+        elif op == "-":
+            return left - right
+        elif op == "*":
+            return left * right
+        elif op == "/":
+            if right == 0:
+                raise PhoenixRuntimeError("Division by zero")
+            return left / right
+        elif op == "%":
+            return left % right
+        elif op == "==":
+            return left == right
+        elif op == "!=":
+            return left != right
+        elif op == "<":
+            return left < right
+        elif op == ">":
+            return left > right
+        elif op == "<=":
+            return left <= right
+        elif op == ">=":
+            return left >= right
+        elif op == "&&":
+            return self._is_truthy(left) and self._is_truthy(right)
+        elif op == "||":
+            return self._is_truthy(left) or self._is_truthy(right)
+        elif op == "&":
+            return left & right
+        elif op == "|":
+            return left | right
+        elif op == "^":
+            return left ^ right
+        elif op == "<<":
+            return left << right
+        elif op == ">>":
+            return left >> right
+        else:
+            raise PhoenixRuntimeError(f"Unknown binary operator: {op}")
+    
+    def _evaluate_unary_operation(self, expr):
+        """Evaluate unary operation"""
+        operand = self._evaluate_expression(expr["operand"])
+        op = expr["operator"]
+        
+        if op == "-":
+            return -operand
+        elif op == "+":
+            return +operand
+        elif op == "!":
+            return not self._is_truthy(operand)
+        elif op == "~":
+            return ~operand
+        else:
+            raise PhoenixRuntimeError(f"Unknown unary operator: {op}")
+    
+    def _evaluate_function_call(self, expr):
+        """Evaluate function call"""
+        func_expr = expr["function"]
+        args = [self._evaluate_expression(arg) for arg in expr["args"]]
+        
+        if func_expr["kind"] == "identifier":
+            func_name = func_expr["name"]
+            
+            # Check for built-in functions first
+            if func_name in ["log", "thread", "join", "mutex", "lock", "unlock"]:
+                return self._call_builtin_function(func_name, args)
+            
+            # Regular function call
+            phoenix_func = self.current_scope.get_function(func_name)
+            return self._execute_function(phoenix_func, args)
+        else:
+            raise PhoenixRuntimeError(f"Cannot call expression of kind: {func_expr['kind']}")
+    
+    def _evaluate_member_access(self, expr):
+        """Evaluate member access (obj.member)"""
+        obj = self._evaluate_expression(expr["object"])
+        member = expr["member"]
+        
+        if isinstance(obj, dict) and member in obj:
+            return obj[member]
+        else:
+            raise PhoenixRuntimeError(f"Object has no member: {member}")
+    
+    def _evaluate_index_access(self, expr):
+        """Evaluate index access (obj[index])"""
+        obj = self._evaluate_expression(expr["object"])
+        index = self._evaluate_expression(expr["index"])
+        
+        if isinstance(obj, (list, str)):
+            try:
+                return obj[index]
+            except IndexError:
+                raise PhoenixRuntimeError(f"Index {index} out of bounds")
+        else:
+            raise PhoenixRuntimeError(f"Cannot index object of type: {type(obj)}")
+    
+    def _evaluate_ternary_expression(self, expr):
+        """Evaluate ternary conditional expression"""
+        condition = self._evaluate_expression(expr["condition"])
+        
+        if self._is_truthy(condition):
+            return self._evaluate_expression(expr["then"])
+        else:
+            return self._evaluate_expression(expr["else"])
+    
+    def _evaluate_constructor(self, expr):
+        """Evaluate constructor call"""
+        type_name = expr["type"]["name"]
+        args = [self._evaluate_expression(arg) for arg in expr["args"]]
+        
+        # Create instance based on type
+        if type_name in self.current_scope.types:
+            phoenix_type = self.current_scope.types[type_name]
+            
+            if isinstance(phoenix_type, PhoenixStruct):
+                # Create struct instance
+                instance = {}
+                for i, field in enumerate(phoenix_type.fields):
+                    if i < len(args):
+                        instance[field["name"]] = args[i]
+                    elif field.get("default"):
+                        instance[field["name"]] = self._evaluate_expression(field["default"])
+                    else:
+                        instance[field["name"]] = self._get_default_value(field["type"])
+                return instance
+        
+        raise PhoenixRuntimeError(f"Unknown constructor: {type_name}")
+    
+    def _call_builtin_function(self, func_name, args):
+        """Call built-in function"""
+        if func_name == "log":
+            output = " ".join(str(arg) for arg in args)
+            print(f"🔥 [Phoenix Log] {output}")
+            return None
+        
+        elif func_name == "thread":
+            if len(args) >= 1:
+                func_to_call = args[0]
+                thread_args = args[1:] if len(args) > 1 else []
+                
+                # For simplicity, we'll execute in the main thread
+                # In a real implementation, this would spawn a new thread
+                print(f"🧵 [Thread] Spawning thread for function: {func_to_call}")
+                
+                # Create a thread ID
+                thread_id = len(self.thread_pool)
+                self.thread_pool.append({
+                    "id": thread_id,
+                    "function": func_to_call,
+                    "args": thread_args,
+                    "completed": False,
+                    "result": None
+                })
+                
+                return thread_id
+            else:
+                raise PhoenixRuntimeError("thread() requires at least one argument")
+        
+        elif func_name == "join":
+            if len(args) == 1:
+                thread_id = args[0]
+                if isinstance(thread_id, int) and 0 <= thread_id < len(self.thread_pool):
+                    thread_info = self.thread_pool[thread_id]
+                    if not thread_info["completed"]:
+                        # Execute the thread's function
+                        func_name = thread_info["function"]
+                        phoenix_func = self.current_scope.get_function(func_name)
+                        result = self._execute_function(phoenix_func, thread_info["args"])
+                        thread_info["result"] = result
+                        thread_info["completed"] = True
+                        print(f"🔗 [Join] Thread {thread_id} completed")
+                    return thread_info["result"]
+                else:
+                    raise PhoenixRuntimeError(f"Invalid thread ID: {thread_id}")
+            else:
+                raise PhoenixRuntimeError("join() requires exactly one argument")
+        
+        elif func_name == "mutex":
+            mutex_id = len(self.mutex_table)
+            self.mutex_table[mutex_id] = {"locked": False, "owner": None}
+            print(f"🔒 [Mutex] Created mutex {mutex_id}")
+            return mutex_id
+        
+        elif func_name == "lock":
+            if len(args) == 1:
+                mutex_id = args[0]
+                if mutex_id in self.mutex_table:
+                    mutex = self.mutex_table[mutex_id]
+                    if not mutex["locked"]:
+                        mutex["locked"] = True
+                        mutex["owner"] = threading.current_thread().ident
+                        print(f"🔒 [Lock] Acquired mutex {mutex_id}")
+                    else:
+                        print(f"⏳ [Lock] Waiting for mutex {mutex_id}")
+                else:
+                    raise PhoenixRuntimeError(f"Invalid mutex ID: {mutex_id}")
+            else:
+                raise PhoenixRuntimeError("lock() requires exactly one argument")
+        
+        elif func_name == "unlock":
+            if len(args) == 1:
+                mutex_id = args[0]
+                if mutex_id in self.mutex_table:
+                    mutex = self.mutex_table[mutex_id]
+                    if mutex["locked"] and mutex["owner"] == threading.current_thread().ident:
+                        mutex["locked"] = False
+                        mutex["owner"] = None
+                        print(f"🔓 [Unlock] Released mutex {mutex_id}")
+                    else:
+                        raise PhoenixRuntimeError(f"Cannot unlock mutex {mutex_id} - not owned by current thread")
+                else:
+                    raise PhoenixRuntimeError(f"Invalid mutex ID: {mutex_id}")
+            else:
+                raise PhoenixRuntimeError("unlock() requires exactly one argument")
+        
+        else:
+            raise PhoenixRuntimeError(f"Unknown built-in function: {func_name}")
+    
+    def _register_builtins(self):
+        """Register built-in functions"""
+        # Built-ins are handled in _call_builtin_function
+        pass
+    
+    def _is_truthy(self, value):
+        """Check if a value is truthy in Phoenix"""
+        if value is None:
+            return False
+        elif isinstance(value, bool):
+            return value
+        elif isinstance(value, (int, float)):
+            return value != 0
+        elif isinstance(value, str):
+            return len(value) > 0
+        elif isinstance(value, list):
+            return len(value) > 0
+        else:
+            return True
+    
+    def _get_default_value(self, phoenix_type):
+        """Get default value for a Phoenix type"""
+        if phoenix_type == "int":
+            return 0
+        elif phoenix_type == "float":
+            return 0.0
+        elif phoenix_type == "bool":
+            return False
+        elif phoenix_type == "string":
+            return ""
+        elif phoenix_type == "char":
+            return '\0'
+        elif phoenix_type == "null":
+            return None
+        else:
+            return None
+
+class PhoenixCompilerAndExecutor:
+    """Complete Phoenix compiler and executor"""
+    
+    def __init__(self, optimization_level=OptimizationLevel.SUPREME):
+        self.compiler = SupremeAOTCompiler(opt_level=optimization_level)
+        self.executor = PhoenixExecutor()
+        
+    def compile_and_run(self, source_code: str):
+        """Compile and execute Phoenix source code"""
+        print("🚀 [Phoenix] Starting compilation and execution...")
+        
+        try:
+            # Lexical analysis
+            tokens = self.compiler._lex_supreme(source_code)
+            
+            # Parsing
+            ast = self.compiler._parse_supreme(tokens)
+            
+            # Semantic analysis
+            analyzed_ast = self.compiler._semantic_analysis_supreme(ast)
+            
+            # Execute the program
+            result = self.executor.execute_program(analyzed_ast)
+            
+            return result
+            
+        except PhoenixException as e:
+            print(f"❌ [Phoenix] Error: {e}")
+            return 1
+
+def run_phoenix_code(source_code: str):
+    """Convenient function to run Phoenix code"""
+    compiler_executor = PhoenixCompilerAndExecutor()
+    return compiler_executor.compile_and_run(source_code)
+
+def run_phoenix_file(filepath: str):
+    """Run Phoenix code from a file"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            source_code = f.read()
+        
+        print(f"📄 [Phoenix] Loading file: {filepath}")
+        return run_phoenix_code(source_code)
+        
+    except FileNotFoundError:
+        print(f"❌ [Phoenix] File not found: {filepath}")
+        return 1
+    except Exception as e:
+        print(f"❌ [Phoenix] Error reading file: {e}")
+        return 1
+
+# Demonstration and testing
+def demo_phoenix_execution():
+    """Demonstrate Phoenix code execution"""
+    
+    print("🔥 Phoenix Programming Language - Pure Execution Demo")
+    print("=" * 60)
+    
+    # Demo 1: Basic arithmetic and variables
+    demo1 = """
+    capsule Demo1 {
+        fn main() -> int {
+            let x = 10;
+            let y = 20;
+            let result = x + y * 2;
+            log("Basic arithmetic:", result);
+            return result;
+        }
+    }
+    """
+    
+    print("\n🧮 Demo 1: Basic Arithmetic")
+    run_phoenix_code(demo1)
+    
+    # Demo 2: Control flow
+    demo2 = """
+    capsule Demo2 {
+        fn factorial(n: int) -> int {
+            if (n <= 1) {
+                return 1;
+            } else {
+                return n * factorial(n - 1);
+            }
+        }
+        
+        fn main() -> int {
+            let result = factorial(5);
+            log("Factorial of 5:", result);
+            return result;
+        }
+    }
+    """
+    
+    print("\n🔄 Demo 2: Recursive Function")
+    run_phoenix_code(demo2)
+    
+    # Demo 3: Loops and mutability
+    demo3 = """
+    capsule Demo3 {
+        fn main() -> int {
+            let mut sum = 0;
+            let mut i = 1;
+            
+            while (i <= 10) {
+                sum = sum + i;
+                i = i + 1;
+            }
+            
+            log("Sum of 1 to 10:", sum);
+            return sum;
+        }
+    }
+    """
+    
+    print("\n🔁 Demo 3: While Loop with Mutable Variables")
+    run_phoenix_code(demo3)
+    
+    # Demo 4: Arrays and for loops
+    demo4 = """
+    capsule Demo4 {
+        fn main() -> int {
+            let numbers = [1, 2, 3, 4, 5];
+            let mut sum = 0;
+            
+            for (let mut i = 0; i < 5; i = i + 1) {
+                sum = sum + numbers[i];
+            }
+            
+            log("Array sum:", sum);
+            return sum;
+        }
+    }
+    """
+    
+    print("\n🔢 Demo 4: Arrays and For Loops")
+    run_phoenix_code(demo4)
+    
+    # Demo 5: Threading
+    demo5 = """
+    capsule Demo5 {
+        fn worker(id: int) -> int {
+            log("Worker", id, "starting");
+            let result = id * id;
+            log("Worker", id, "result:", result);
+            return result;
+        }
+        
+        fn main() -> int {
+            log("Starting threaded computation");
+            
+            let t1 = thread(worker, 5);
+            let t2 = thread(worker, 7);
+            
+            let result1 = join(t1);
+            let result2 = join(t2);
+            
+            let total = result1 + result2;
+            log("Total result:", total);
+            return total;
+        }
+    }
+    """
+    
+    print("\n🧵 Demo 5: Threading")
+    run_phoenix_code(demo5)
+    
+    # Demo 6: Error handling
+    demo6 = """
+    capsule Demo6 {
+        fn risky_division(a: int, b: int) -> int {
+            if (b == 0) {
+                throw "Division by zero!";
+            }
+            return a / b;
+        }
+        
+        fn main() -> int {
+            try {
+                let result1 = risky_division(10, 2);
+                log("Safe division:", result1);
+                
+                let result2 = risky_division(10, 0);
+                log("This won't be reached");
+            } catch (e: string) {
+                log("Caught exception:", e);
+                return 1;
+            }
+            
+            return 0;
+        }
+    }
+    """
+    
+    print("\n⚠️ Demo 6: Exception Handling")
+    run_phoenix_code(demo6)
+    
+    print(f"\n🏆 Phoenix execution demos completed!")
+
+# Main execution point
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        # Run Phoenix file provided as command line argument
+        filepath = sys.argv[1]
+        result = run_phoenix_file(filepath)
+        sys.exit(result)
+    else:
+        # Run demos
+        demo_phoenix_execution()
+        
+        # Interactive mode
+        print("\n🔥 Phoenix Interactive Mode")
+        print("Enter Phoenix code (type 'exit' to quit):")
+        
+        while True:
+            try:
+                code_input = input("🚀 Phoenix> ")
+                if code_input.strip().lower() == 'exit':
+                    break
+                
+                if code_input.strip():
+                    # Wrap single expressions in a main function
+                    if not code_input.strip().startswith('capsule'):
+                        code_input = f"""
+                        capsule Interactive {{
+                            fn main() -> int {{
+                                {code_input}
+                                return 0;
+                            }}
+                        }}
+                        """
+                    
+                    run_phoenix_code(code_input)
+                    
+            except KeyboardInterrupt:
+                print("\n👋 Goodbye!")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+
+                # Phoenix Programming Language - AOT Compiler and Executor
+                import threading
+                class PhoenixExecutor:
+                """Phoenix executor for running compiled Phoenix code"""
