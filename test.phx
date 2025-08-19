@@ -1,6 +1,21 @@
 capsule Main {
     fn main(): int {
-        log("🔥 Phoenix capsule ignition successful.");
+        try {
+            log("🔥 Capsule ignition confirmed.");
+        } catch(e: string) {
+            log("Logging failed:", e);
+        }
         return 0;
     }
 }
+
+export capsule Guardian {
+    fn main(): int {
+        log("🛡️ Guardian awakened.");
+        trace("glyph.pulse", "Phoenix ignition sequence started.");
+        log("🔥 Glyph: ⟠");  // Phoenix sigil
+        trace("glyph.pulse", "Phoenix ignition complete.");
+        return 0;
+    }
+}
+
