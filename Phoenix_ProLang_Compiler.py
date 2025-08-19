@@ -13,6 +13,9 @@ from typing import Dict, List, Any, Optional, Union, Set, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 import weakref
+import os
+import time
+import subprocess
 
 class OptimizationLevel(Enum):
     DEBUG = 0
@@ -2851,10 +2854,6 @@ if __name__ == "__main__":
     print("\n🚀💥 ULTIMATE PHOENIX READY!")
     print("Compile and execute code faster than anything in existence!")
     
-import os
-import time
-import subprocess
-
 GLYPH_FRAMES = [
     "⟡", "⟠", "⟣", "⟢", "⟡"
 ]
