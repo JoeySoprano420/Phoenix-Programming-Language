@@ -1263,3 +1263,198 @@ if __name__ == "__main__":
     import time
     class CapsuleCompiler:
         """Compiler for Phoenix ProLang capsules"""
+        def __init__(self, dialect="safe"):
+            self.dialect = dialect
+            self.instructions = []
+            self.temp_counter = 0
+            
+        def fresh_temp(self):
+            """Generate a new temporary variable name"""
+            temp_name = f"temp_{self.temp_counter}"
+            self.temp_counter += 1
+            return temp_name
+            
+        def emit(self, opcode, *args, **metadata):
+            """Emit an IR instruction"""
+            instruction = {
+                "opcode": opcode,
+                "args": args,
+                "metadata": metadata
+            }
+            self.instructions.append(instruction)
+        
+        def compile_capsule(self, node):
+            """Compile a Phoenix capsule into IR"""
+            
+            class IRGenerator:
+                def __init__(self, dialect):
+                    self.dialect = dialect
+                    self.instructions = []
+                    self.temp_counter = 0
+                    
+                def fresh_temp(self):
+                    """Generate a new temporary variable name"""
+                    temp_name = f"temp_{self.temp_counter}"
+                    self.temp_counter += 1
+                    return temp_name
+                
+                def emit(self, opcode, *args, **metadata):
+                    """Emit an IR instruction"""
+                    instruction = {
+                        "opcode": opcode,
+                        "args": args,
+                        "metadata": metadata
+                    }
+                    self.instructions.append(instruction)
+                
+                def generate_node(self, node):
+                    """Generate IR for a given AST node"""
+                    if not isinstance(node, dict):
+                        return None
+                    
+                    kind = node.get("kind")
+                    
+                    if kind == "capsule":
+                        return self.generate_capsule(node)
+                    elif kind == "function":
+                        return self.generate_function(node)
+                    elif kind == "return":
+                        return self.generate_return(node)
+                    elif kind == "literal":
+                        return self.generate_literal(node)
+                    elif kind == "var":
+                        return self.generate_var(node)
+                    
+                    # Handle other kinds of nodes (e.g., expressions, statements)
+                    # ...
+                    
+                def generate_capsule(self, node):
+                    """Generate IR for a capsule"""
+                    capsule_name = node.get("name", "Main")
+                    
+                    # Start capsule
+                    self.emit("CAPSULE_START", capsule_name)
+                    
+                    # Process functions
+                    for func_name, func_node in node.get("functions", {}).items():
+                        self.generate_function(func_node)
+                        
+                    # End capsule
+                    self.emit("CAPSULE_END", capsule_name)
+                    
+                def generate_function(self,
+                                      node):
+                        """Generate IR for a function"""
+                        func_name = node.get("name", "unknown")
+                        params = node.get("params", [])
+                        
+                        # Start function definition
+                        self.emit("FUNC_START", func_name, params)
+                        
+                        # Process function body
+                        for stmt in node.get("body", []):
+                            self.generate_node(stmt)
+                            
+                        # End function
+                        self.emit("FUNC_END")
+
+                        def generate_return(self, node):
+                            """Generate IR for a return statement"""
+                            if "value" in node:
+                                value = self.generate_node(node["value"])
+                                self.emit("RETURN", value)
+                            else:
+                                self.emit("RETURN_VOID")
+                                def generate_literal(self, node):
+                                    """Generate IR for a literal value"""
+                                    if "value" in node:
+                                        value = node["value"]
+                                        temp = self.fresh_temp()
+                                        self.emit("LOAD_CONST", temp, value)
+                                        return temp
+                                    return None
+
+                                def generate_var(self, node):
+                                    """Generate IR for a variable"""
+                                    if "name" in node:
+                                        var_name = node["name"]
+                                        temp = self.fresh_temp()
+                                        self.emit("LOAD_VAR", temp, var_name)
+                                        return temp
+                                    return None
+                                def generate_ir(self, ast):
+                                    """Generate IR from AST"""
+                                    if not isinstance(ast, dict):
+                                        return None
+                                    
+                                    ir = []
+                                    for node in ast.get("body", []):
+                                        ir_node = self.generate_node(node)
+                                        if ir_node:
+                                            ir.append(ir_node)
+                                    return ir
+                                # Create IR generator
+                                ir_generator = IRGenerator(self.dialect)
+                                ir = ir_generator.generate_ir(node)
+                                # Create IR generator
+                                class BytecodeEmitter:
+                                    """Emit bytecode from IR"""
+                                    def __init__(self, dialect="safe"):
+                                        self.dialect = dialect
+                                        self.bytecode = []
+                                        self.constants = []
+                                        self.symbols = {}
+                                        self.labels = {}
+                                        self.temp_counter = 0
+                                        
+                                    def fresh_temp(self):
+                                        """Generate a new temporary variable name"""
+                                        temp_name = f"temp_{self.temp_counter}"
+                                        self.temp_counter += 1
+                                        return temp_name
+                                        
+                                    def add_constant(self, value):
+                                        """Add a constant to the bytecode"""
+                                        if value not in self.constants:
+                                            self.constants.append(value)
+                                        return self.constants.index(value)
+                                        
+                                    def emit_byte(self, opcode, *args, **metadata):
+                                        """Emit a bytecode instruction"""
+                                        instruction = {
+                                            "opcode": opcode,
+                                            "args": args,
+                                            "metadata": metadata
+                                        }
+                                        self.bytecode.append(instruction)
+                                        
+                                    def resolve_labels(self):
+                                        """Resolve label references in bytecode"""
+                                        for instruction in self.bytecode:
+                                            if instruction["opcode"] == "JUMP":
+                                                target_label = instruction["args"][0]
+                                                if target_label in self.labels:
+                                                    instruction["args"][0] = self.labels[target_label]
+                                                else:
+                                                    raise PhoenixException(f"Undefined label: {target_label}")
+                                            
+                                            elif instruction["opcode"] == "BRANCH_FALSE":
+                                                cond, target_label = instruction["args"]
+                                                if target_label in self.labels:
+                                                    instruction["args"][1] = self.labels[target_label]
+                                                else:
+                                                    raise PhoenixException(f"Undefined label: {target_label}")
+                                            
+                                    def optimize_bytecode(self):
+                                        """Optimize bytecode (placeholder for future optimizations)"""
+                                        pass
+                                    
+                                    def emit_ir_instruction(self, ir_instr):
+                                        """Emit an IR instruction as bytecode"""
+                                        opcode, args, metadata = ir_instr["opcode"], ir_instr["args"], ir_instr.get("metadata", {})
+                                        
+                                        if isinstance(args, list):
+                                            args = tuple(args)
+                                            if opcode == "LOAD_CONST":
+                                                const_idx = self.add_constant(args[1])
+                                                self.emit_byte(opcode, args[0], const_idx, **metadata)
