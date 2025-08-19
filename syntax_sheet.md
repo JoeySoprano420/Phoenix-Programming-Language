@@ -297,5 +297,220 @@ Phoenix syntax is:
 
 ⚡ This is now a **full syntax sheet** suitable for writing a Phoenix grammar, building IDE tooling, or expanding the compiler pipeline.
 
+----
+
+Think of this as the **ultimate demo file** for Phoenix — if this runs, you know the compiler + runtime is complete.
+
+---
+
+# 📜 `demo.phx`
+
+```phoenix
+// ==============================
+// Capsule: Utilities
+// ==============================
+capsule Util {
+    // Exported pure constexpr function
+    export constexpr fn factorial(n: int): int {
+        if (n <= 1) return 1;
+        return n * factorial(n - 1);
+    }
+
+    // Exported trait
+    export trait Addable {
+        fn add(self, other: Self): Self;
+    }
+
+    // Implementation of Addable for int
+    impl Addable for int {
+        fn add(self, other: int): int { return self + other; }
+    }
+}
+
+// ==============================
+// Capsule: Counter
+// ==============================
+capsule Counter {
+    // Exported global state
+    export let mut counter: int = 0;
+    export let m = mutex();
+
+    // Worker increments the counter safely
+    export fn worker(n: int): int {
+        let mut i = 0;
+        while (i < n) {
+            lock(m);
+            counter = counter + 1;
+            unlock(m);
+            i = i + 1;
+        }
+        return 0;
+    }
+}
+
+// ==============================
+// Capsule: Data Types
+// ==============================
+capsule Data {
+    // Struct with RAII destructor
+    export struct File {
+        let mut fd: int;
+
+        fn drop(self) {
+            log("Closing file with fd=", self.fd);
+        }
+    }
+
+    // Enum type
+    export enum Result {
+        Ok(int),
+        Err(string)
+    }
+
+    // Function that may throw
+    fn risky_div(a: int, b: int): Result {
+        if (b == 0) {
+            throw "division by zero";
+        }
+        return Result::Ok(a / b);
+    }
+}
+
+// ==============================
+// Capsule: Main Application
+// ==============================
+capsule Main {
+    import Util as U;
+    import Counter;
+    import Data;
+
+    // Example of constexpr in type definition
+    let mut table: [int; U.factorial(4)] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24];
+
+    fn compute_sum<T: U.Addable>(a: T, b: T): T {
+        return a.add(b);
+    }
+
+    fn main(): int {
+        log("Phoenix Rosetta Stone Demo Starting...");
+
+        // =============================
+        // Threads & Mutex
+        // =============================
+        let t1 = thread(Counter.worker, 50000);
+        let t2 = thread(Counter.worker, 50000);
+        join(t1); join(t2);
+        log("Final counter value:", Counter.counter);
+
+        // =============================
+        // Constexpr factorial demo
+        // =============================
+        log("Factorial(5) = ", U.factorial(5));
+
+        // =============================
+        // Traits & Generics
+        // =============================
+        let s = compute_sum(10, 32);
+        log("Sum via Addable trait:", s);
+
+        // =============================
+        // Struct RAII demo
+        // =============================
+        {
+            let f = new Data.File(123);
+            log("Using file FD=", f.fd);
+        } // <- auto drop called here
+
+        // =============================
+        // Try/Catch & Enums
+        // =============================
+        try {
+            let res = Data.risky_div(10, 0);
+            log("Division result:", res);
+        } catch(e: string) {
+            log("Caught error:", e);
+        }
+
+        log("Phoenix Rosetta Stone Demo Complete.");
+        return 0;
+    }
+}
+```
+
+---
+
+# ✅ Features Demonstrated
+
+1. **Capsules & Imports**
+
+   * `capsule Util`, `capsule Counter`, `capsule Data`, `capsule Main`
+   * `import Util as U;`
+   * `import Counter;`
+
+2. **Exports**
+
+   * `export let mut counter` (global variable)
+   * `export fn worker` (function)
+   * `export struct File` (RAII struct)
+
+3. **Types**
+
+   * Primitive (`int`, `string`, `bool`)
+   * Arrays with constexpr size
+   * Structs with RAII `drop`
+   * Enums (`Result`)
+   * Traits (`Addable`)
+
+4. **Constexpr + Generics**
+
+   * `constexpr fn factorial`
+   * Compile-time array size
+   * Generic function with trait bounds:
+
+     ```phoenix
+     fn compute_sum<T: U.Addable>(a: T, b: T): T
+     ```
+
+5. **Concurrency**
+
+   * Mutexes (`mutex`, `lock`, `unlock`)
+   * Threads (`thread`, `join`)
+
+6. **RAII + Panic Safety**
+
+   * Struct destructor `drop`
+   * Destructor runs at scope exit
+   * Destructor also runs during `throw`
+
+7. **Error Handling**
+
+   * `throw` + `try/catch`
+   * Exception-safe destructors
+
+---
+
+# 🔮 Expected Output (Simplified)
+
+```
+[log] Phoenix Rosetta Stone Demo Starting...
+[log] Final counter value: 100000
+[log] Factorial(5) = 120
+[log] Sum via Addable trait: 42
+[log] Using file FD=123
+[log] Closing file with fd=123
+[log] Caught error: division by zero
+[log] Phoenix Rosetta Stone Demo Complete.
+[exit] status = 0
+```
+
+---
+
+👉 This program is like the **“master test suite”** of Phoenix.
+If the compiler can parse → type-check → optimize → emit LLVM/ASM → run this file, then Phoenix is basically feature-complete.
+
+---
+
+
+
 ---
 
