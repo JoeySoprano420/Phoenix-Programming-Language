@@ -1,0 +1,6 @@
+capsule Main {
+    fn main(): int {
+        log("Hello from Phoenix!");
+        return 0;
+    }
+}
