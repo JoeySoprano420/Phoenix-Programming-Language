@@ -19237,3 +19237,1900 @@ namespace PhoenixCompiler
             };
         }
 
+        private bool IsReferenceType(TypeNode type)
+        {
+            if (type == null) return false;
+
+            // Classify by concrete AST node kinds that semantically represent references.
+            if (type is PointerTypeNode) return true;          // Explicit pointer
+            if (type is ReferenceTypeNode) return true;        // Explicit reference
+            if (type is ArrayTypeNode) return true;            // Arrays are reference-like (bounds / null checks)
+
+            // PrimitiveTypeNode and other (future) value types are not reference types.
+            return false;
+        }
+
+        private bool IsReferenceType(string typeName)
+        {
+            if (string.IsNullOrWhiteSpace(typeName))
+                return false;
+
+            // Normalize
+            typeName = typeName.Trim();
+
+            // Heuristics for pointer/reference spelling
+            if (typeName.EndsWith("*", StringComparison.Ordinal)) return true;
+            if (typeName.EndsWith("&", StringComparison.Ordinal)) return true;
+
+            // Generic pointer-like wrappers
+            if (typeName.StartsWith("ptr<", StringComparison.OrdinalIgnoreCase)) return true;
+            if (typeName.StartsWith("ref<", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Common builtin reference-like types (adjust as language evolves)
+            switch (typeName)
+            {
+                case "string":
+                case "String":
+                case "object":
+                case "Object":
+                    return true;
+            }
+
+            // Arrays (simple convention: trailing brackets)
+            if (typeName.EndsWith("[]", StringComparison.Ordinal)) return true;
+
+            // Capsule / class naming conventions: treat capitalized identifiers that are
+            // declared as capsules (if symbol table available) as reference types.
+            var symbol = currentScope?.Lookup(typeName);
+            if (symbol != null && symbol.IsType)
+            {
+                // If the symbol was defined as a capsule / struct you may distinguish here.
+                // Assuming capsules are reference, structs value:
+                if (IsCapsuleType(symbol)) return true;
+                if (IsStructType(symbol)) return false;
+            }
+
+            return false;
+        }
+
+        private bool IsCapsuleType(Symbol symbol)
+        {
+            // Placeholder heuristic: real implementation would tag symbol metadata.
+            // For now assume names ending with "Capsule" or explicitly registered.
+            if (symbol == null) return false;
+            return symbol.Type == "capsule" ||
+                   symbol.Name.EndsWith("Capsule", StringComparison.Ordinal);
+        }
+
+        private bool IsStructType(Symbol symbol)
+        {
+            if (symbol == null) return false;
+            return symbol.Type == "struct" ||
+                   symbol.Name.EndsWith("Struct", StringComparison.Ordinal);
+        }
+
+        #region === Native Transpilation & LLVM-Like Backend Extension (Appended) ===
+        // High‑level options for native generation.
+        public sealed class NativeBackendOptions
+        {
+            public bool EmitObjectFile { get; set; } = true;
+            public bool EmitExecutable { get; set; } = false;
+            public bool Optimize { get; set; } = true;
+            public bool EnableVectorIntrinsics { get; set; } = true;
+            public bool EnableStackProbing { get; set; } = true;
+            public string ModuleName { get; set; } = "phoenix_module";
+            public string OutputPath { get; set; } = "a.out";
+            public OptimizationLevelOpt Level { get; set; } = OptimizationLevelOpt.O2;
+        }
+
+        public enum OptimizationLevelOpt { O0, O1, O2, O3, Os, Oz }
+
+        // Public entry for native generation (can be called after normal Generate()).
+        public partial class CodeGenerator
+        {
+            public NativeTranspilationResult GenerateNative(ProgramNode program, NativeBackendOptions options)
+            {
+                if (program == null) throw new ArgumentNullException(nameof(program));
+                if (options == null) options = new NativeBackendOptions();
+
+                var diagnostics = new List<string>();
+                var irBuilder = new PhoenixIRBuilder(diagnostics);
+                var irModule = irBuilder.Build(program);
+
+                var intrinsicRegistry = PhoenixIntrinsicRegistry.CreateDefault();
+                var llvmModule = new LLVMLikeModule(options.ModuleName, intrinsicRegistry, diagnostics);
+                var lowering = new IRToLLVMLowering(intrinsicRegistry, diagnostics);
+                lowering.Lower(irModule, llvmModule);
+
+                if (options.Optimize)
+                {
+                    var opt = new LLVMOptimizationPipeline(diagnostics, options.Level);
+                    opt.Run(llvmModule);
+                }
+
+                var x64Emitter = new X64WindowsEmitter(diagnostics, new X64EmitterOptions
+                {
+                    EnableStackProbing = options.EnableStackProbing,
+                    GenerateSymbols = true,
+                    UseSEH = true
+                });
+
+                var mc = x64Emitter.Emit(llvmModule);
+
+                if (options.EmitObjectFile)
+                    ObjectFileWriter.WriteCOFF(mc, options.OutputPath + ".obj", diagnostics);
+
+                if (options.EmitExecutable)
+                    LinkerDriver.TryLinkPE(new LinkerOptions
+                    {
+                        ObjectFiles = new List<string> { options.OutputPath + ".obj" },
+                        OutputImage = options.OutputPath + ".exe"
+                    }, diagnostics);
+
+                return new NativeTranspilationResult
+                {
+                    Success = diagnostics.All(d => !d.StartsWith("error", StringComparison.OrdinalIgnoreCase)),
+                    Diagnostics = diagnostics,
+                    IR = irModule,
+                    LLVM = llvmModule,
+                    MachineCode = mc
+                };
+            }
+        }
+
+        #region IR MODEL (Introspective High-Level IR)
+        public sealed class PhoenixIRModule
+        {
+            public string Name { get; }
+            public List<PhoenixIRFunction> Functions { get; } = new();
+            public List<PhoenixIRGlobal> Globals { get; } = new();
+            public PhoenixIRModule(string name) => Name = name;
+        }
+        public sealed class PhoenixIRFunction
+        {
+            public string Name { get; set; }
+            public string ReturnType { get; set; }
+            public List<(string type, string name)> Parameters { get; } = new();
+            public List<PhoenixIRBlock> Blocks { get; } = new();
+            public bool IsExternal { get; set; }
+        }
+        public sealed class PhoenixIRGlobal
+        {
+            public string Name { get; set; }
+            public string Type { get; set; }
+            public object InitialValue { get; set; }
+            public bool IsConst { get; set; }
+        }
+        public sealed class PhoenixIRBlock
+        {
+            public string Label { get; set; }
+            public List<PhoenixIRInst> Instructions { get; } = new();
+        }
+        public abstract class PhoenixIRInst
+        {
+            public string Result { get; set; } // %vX if producing a value
+            public abstract string OpCode { get; }
+        }
+        public sealed class IRBinOp : PhoenixIRInst
+        {
+            public string Left { get; set; }
+            public string Right { get; set; }
+            public string Operator { get; set; }
+            public override string OpCode => "binop";
+        }
+        public sealed class IRReturn : PhoenixIRInst
+        {
+            public string Value { get; set; }
+            public override string OpCode => "ret";
+        }
+        public sealed class IRCall : PhoenixIRInst
+        {
+            public string Callee { get; set; }
+            public List<string> Args { get; } = new();
+            public override string OpCode => "call";
+        }
+        public sealed class IRBranchCond : PhoenixIRInst
+        {
+            public string Condition { get; set; }
+            public string TrueTarget { get; set; }
+            public string FalseTarget { get; set; }
+            public override string OpCode => "brc";
+        }
+        public sealed class IRBranch : PhoenixIRInst
+        {
+            public string Target { get; set; }
+            public override string OpCode => "br";
+        }
+        public sealed class IRAlloca : PhoenixIRInst
+        {
+            public string AllocType { get; set; }
+            public override string OpCode => "alloca";
+        }
+        public sealed class IRLoad : PhoenixIRInst
+        {
+            public string Address { get; set; }
+            public override string OpCode => "load";
+        }
+        public sealed class IRStore : PhoenixIRInst
+        {
+            public string Address { get; set; }
+            public string Value { get; set; }
+            public override string OpCode => "store";
+        }
+        public sealed class IRConst : PhoenixIRInst
+        {
+            public string ConstType { get; set; }
+            public object ConstValue { get; set; }
+            public override string OpCode => "const";
+        }
+
+        public sealed class PhoenixIRBuilder
+        {
+            private readonly List<string> diagnostics;
+            private int tempId;
+
+            public PhoenixIRBuilder(List<string> diagnostics) => this.diagnostics = diagnostics;
+
+            public PhoenixIRModule Build(ProgramNode program)
+            {
+                var module = new PhoenixIRModule("phoenix_ir");
+                if (program?.Declarations == null) return module;
+
+                foreach (var decl in program.Declarations.OfType<FunctionDeclarationNode>())
+                    module.Functions.Add(BuildFunction(decl));
+
+                foreach (var g in program.Declarations.OfType<VariableDeclarationNode>())
+                    module.Globals.Add(new PhoenixIRGlobal
+                    {
+                        Name = g.Name,
+                        Type = GetTypeName(g.Type),
+                        InitialValue = ExtractConst(g.Initializer),
+                        IsConst = false
+                    });
+
+                return module;
+            }
+
+            private PhoenixIRFunction BuildFunction(FunctionDeclarationNode fn)
+            {
+                var f = new PhoenixIRFunction
+                {
+                    Name = fn.Name,
+                    ReturnType = GetTypeName(fn.ReturnType),
+                    IsExternal = fn.Body == null
+                };
+                if (fn.Parameters != null)
+                    foreach (var p in fn.Parameters)
+                        f.Parameters.Add((GetTypeName(p.Type), p.Name));
+
+                if (fn.Body != null)
+                {
+                    var entry = new PhoenixIRBlock { Label = "entry" };
+                    f.Blocks.Add(entry);
+                    // Minimal stub: allocate parameters (future: SSA form).
+                    foreach (var p in f.Parameters)
+                    {
+                        entry.Instructions.Add(new IRAlloca { AllocType = p.type, Result = $"%{p.name}_addr" });
+                        entry.Instructions.Add(new IRStore
+                        {
+                            Address = $"%{p.name}_addr",
+                            Value = $"%arg_{p.name}"
+                        });
+                    }
+                    // Placeholder: real lowering of statements required.
+                    entry.Instructions.Add(new IRConst
+                    {
+                        ConstType = f.ReturnType,
+                        ConstValue = GetDefaultConst(f.ReturnType),
+                        Result = "%ret_default"
+                    });
+                    entry.Instructions.Add(new IRReturn { Value = "%ret_default" });
+                }
+                return f;
+            }
+
+            private string GetTypeName(TypeNode t)
+            {
+                switch (t)
+                {
+                    case PrimitiveTypeNode p: return p.Name;
+                    case PointerTypeNode ptr: return GetTypeName(ptr.BaseType) + "*";
+                    case ReferenceTypeNode r: return GetTypeName(r.BaseType) + "&";
+                    case ArrayTypeNode a: return GetTypeName(a.ElementType) + "[]";
+                }
+                return "void";
+            }
+
+            private object GetDefaultConst(string typeName) =>
+                typeName switch
+                {
+                    "int" => 0,
+                    "i32" => 0,
+                    "i64" => 0L,
+                    "float" => 0f,
+                    "double" => 0d,
+                    "bool" => 0,
+                    _ => 0
+                };
+
+            private object ExtractConst(ExpressionNode expr)
+            {
+                if (expr is LiteralExpressionNode lit) return lit.Value;
+                return null;
+            }
+
+            private string NewTemp() => $"%t{++tempId}";
+        }
+        #endregion
+
+        #region LLVM-LIKE LAYER & INTRINSICS
+        public sealed class LLVMLikeModule
+        {
+            public string Name { get; }
+            public List<LLVMFunction> Functions { get; } = new();
+            public List<LLVMGlobal> Globals { get; } = new();
+            public PhoenixIntrinsicRegistry Intrinsics { get; }
+            public List<string> Diagnostics { get; }
+            public LLVMLikeModule(string name, PhoenixIntrinsicRegistry intrinsics, List<string> diagnostics)
+            {
+                Name = name;
+                Intrinsics = intrinsics;
+                Diagnostics = diagnostics;
+            }
+        }
+        public sealed class LLVMFunction
+        {
+            public string Name { get; set; }
+            public string ReturnType { get; set; }
+            public List<(string type, string name)> Parameters { get; } = new();
+            public List<LLVMBasicBlock> Blocks { get; } = new();
+        }
+        public sealed class LLVMBasicBlock
+        {
+            public string Label { get; set; }
+            public List<LLVMInst> Instructions { get; } = new();
+        }
+        public abstract class LLVMInst { public abstract string Mnemonic { get; } }
+
+        public sealed class LLVMAddInst : LLVMInst
+        {
+            public string Dest { get; set; }
+            public string Left { get; set; }
+            public string Right { get; set; }
+            public override string Mnemonic => "add";
+        }
+        public sealed class LLVMRetInst : LLVMInst
+        {
+            public string Value { get; set; }
+            public override string Mnemonic => "ret";
+        }
+        public sealed class LLVMLoadInst : LLVMInst
+        {
+            public string Dest { get; set; }
+            public string Address { get; set; }
+            public override string Mnemonic => "load";
+        }
+        public sealed class LLVMStoreInst : LLVMInst
+        {
+            public string Address { get; set; }
+            public string Value { get; set; }
+            public override string Mnemonic => "store";
+        }
+        public sealed class LLVMCallInst : LLVMInst
+        {
+            public string Dest { get; set; }
+            public string Callee { get; set; }
+            public List<string> Args { get; } = new();
+            public override string Mnemonic => "call";
+        }
+
+        public sealed class LLVMGlobal
+        {
+            public string Name { get; set; }
+            public string Type { get; set; }
+            public object Value { get; set; }
+        }
+
+        public sealed class IRToLLVMLowering
+        {
+            private readonly PhoenixIntrinsicRegistry intrinsics;
+            private readonly List<string> diagnostics;
+            public IRToLLVMLowering(PhoenixIntrinsicRegistry intrinsics, List<string> diagnostics)
+            {
+                this.intrinsics = intrinsics;
+                this.diagnostics = diagnostics;
+            }
+
+            public void Lower(PhoenixIRModule ir, LLVMLikeModule llvm)
+            {
+                foreach (var g in ir.Globals)
+                    llvm.Globals.Add(new LLVMGlobal { Name = g.Name, Type = g.Type, Value = g.InitialValue });
+
+                foreach (var f in ir.Functions)
+                    llvm.Functions.Add(LowerFunction(f));
+            }
+
+            private LLVMFunction LowerFunction(PhoenixIRFunction f)
+            {
+                var lf = new LLVMFunction { Name = f.Name, ReturnType = f.ReturnType };
+                foreach (var p in f.Parameters) lf.Parameters.Add(p);
+
+                foreach (var b in f.Blocks)
+                {
+                    var lb = new LLVMBasicBlock { Label = b.Label };
+                    foreach (var inst in b.Instructions)
+                        LowerInst(inst, lb);
+                    lf.Blocks.Add(lb);
+                }
+                return lf;
+            }
+
+            private void LowerInst(PhoenixIRInst ir, LLVMBasicBlock block)
+            {
+                switch (ir)
+                {
+                    case IRConst c:
+                        // Represent constants via pseudo store to a synthetic symbol (simplified).
+                        block.Instructions.Add(new LLVMAddInst
+                        {
+                            Dest = c.Result,
+                            Left = "0",
+                            Right = c.ConstValue?.ToString() ?? "0"
+                        });
+                        break;
+                    case IRReturn r:
+                        block.Instructions.Add(new LLVMRetInst { Value = r.Value });
+                        break;
+                    case IRStore s:
+                        block.Instructions.Add(new LLVMStoreInst { Address = s.Address, Value = s.Value });
+                        break;
+                    case IRLoad l:
+                        block.Instructions.Add(new LLVMLoadInst { Dest = l.Result, Address = l.Address });
+                        break;
+                    case IRBinOp b:
+                        block.Instructions.Add(new LLVMAddInst
+                        {
+                            Dest = b.Result,
+                            Left = b.Left,
+                            Right = b.Right // Simplified (all binops as add)
+                        });
+                        break;
+                    case IRCall c:
+                        block.Instructions.Add(new LLVMCallInst
+                        {
+                            Dest = c.Result,
+                            Callee = c.Callee,
+                            Args = { c.Args }
+                        });
+                        break;
+                    case IRAlloca a:
+                        // Omitted: would map to stack frame layout analysis.
+                        break;
+                    case IRBranch:
+                    case IRBranchCond:
+                        // Control flow translation omitted for brevity.
+                        break;
+                    default:
+                        diagnostics.Add($"warning: unhandled IR instruction '{ir.OpCode}'");
+                        break;
+                }
+            }
+        }
+
+        public sealed class LLVMOptimizationPipeline
+        {
+            private readonly List<string> diagnostics;
+            private readonly OptimizationLevelOpt level;
+            public LLVMOptimizationPipeline(List<string> diagnostics, OptimizationLevelOpt level)
+            {
+                this.diagnostics = diagnostics;
+                this.level = level;
+            }
+            public void Run(LLVMLikeModule module)
+            {
+                if (level == OptimizationLevelOpt.O0) return;
+                // Skeleton passes:
+                ConstantCombine(module);
+                DeadInstElim(module);
+                Peephole(module);
+            }
+            private void ConstantCombine(LLVMLikeModule m) { /* placeholder */ }
+            private void DeadInstElim(LLVMLikeModule m) { /* placeholder */ }
+            private void Peephole(LLVMLikeModule m) { /* placeholder */ }
+        }
+
+        public sealed class PhoenixIntrinsicRegistry
+        {
+            private readonly Dictionary<string, PhoenixIntrinsic> intrinsics = new(StringComparer.OrdinalIgnoreCase);
+            public IEnumerable<PhoenixIntrinsic> All => intrinsics.Values;
+            public bool TryGet(string name, out PhoenixIntrinsic i) => intrinsics.TryGetValue(name, out i);
+
+            public static PhoenixIntrinsicRegistry CreateDefault()
+            {
+                var r = new PhoenixIntrinsicRegistry();
+                r.Register(new PhoenixIntrinsic("phoenix.memcpy", IntrinsicKind.Memory));
+                r.Register(new PhoenixIntrinsic("phoenix.memset", IntrinsicKind.Memory));
+                r.Register(new PhoenixIntrinsic("phoenix.vector.add.f32", IntrinsicKind.Vector));
+                r.Register(new PhoenixIntrinsic("phoenix.cpu.rdtsc", IntrinsicKind.CPU));
+                return r;
+            }
+            public void Register(PhoenixIntrinsic intrinsic) => intrinsics[intrinsic.Name] = intrinsic;
+        }
+        public sealed class PhoenixIntrinsic
+        {
+            public string Name { get; }
+            public IntrinsicKind Kind { get; }
+            public PhoenixIntrinsic(string name, IntrinsicKind kind) { Name = name; Kind = kind; }
+        }
+        public enum IntrinsicKind { Memory, Vector, CPU, Crypto, Atomic }
+        #endregion
+
+        #region X64 WINDOWS EMISSION
+        public sealed class X64EmitterOptions
+        {
+            public bool EnableStackProbing { get; set; }
+            public bool GenerateSymbols { get; set; }
+            public bool UseSEH { get; set; }
+        }
+
+        public sealed class MachineCodeModule
+        {
+            public byte[] Bytes { get; set; } = Array.Empty<byte>();
+            public List<MachineSymbol> Symbols { get; } = new();
+            public string Disassembly { get; set; }
+        }
+        public sealed class MachineSymbol
+        {
+            public string Name { get; set; }
+            public int Offset { get; set; }
+            public int Length { get; set; }
+        }
+
+        public sealed class X64WindowsEmitter
+        {
+            private readonly List<string> diagnostics;
+            private readonly X64EmitterOptions options;
+            private readonly MemoryStream buffer = new();
+            private readonly BinaryWriter writer;
+
+            public X64WindowsEmitter(List<string> diagnostics, X64EmitterOptions options)
+            {
+                this.diagnostics = diagnostics;
+                this.options = options;
+                writer = new BinaryWriter(buffer, Encoding.UTF8, leaveOpen: true);
+            }
+
+            public MachineCodeModule Emit(LLVMLikeModule module)
+            {
+                var mc = new MachineCodeModule();
+                foreach (var fn in module.Functions)
+                    EmitFunction(fn, mc);
+                mc.Bytes = buffer.ToArray();
+                mc.Disassembly = "// Disassembly placeholder (integrate external disassembler)";
+                return mc;
+            }
+
+            private void EmitFunction(LLVMFunction fn, MachineCodeModule mc)
+            {
+                var start = (int)buffer.Position;
+                if (options.GenerateSymbols)
+                    mc.Symbols.Add(new MachineSymbol { Name = fn.Name, Offset = start });
+
+                EmitPrologue(fn);
+                foreach (var block in fn.Blocks)
+                    EmitBlock(block);
+                EmitEpilogue(fn);
+
+                var end = (int)buffer.Position;
+                mc.Symbols.Last().Length = end - start;
+            }
+
+            // Windows x64: Prologue (push rbp; mov rbp, rsp; allocate shadow space + locals)
+            private void EmitPrologue(LLVMFunction fn)
+            {
+                // push rbp
+                writer.Write((byte)0x55);
+                // mov rbp, rsp
+                writer.Write(new byte[] { 0x48, 0x89, 0xE5 });
+                // sub rsp, imm8 (placeholder stack frame 32 bytes)
+                writer.Write(new byte[] { 0x48, 0x83, 0xEC, 0x20 });
+            }
+
+            private void EmitBlock(LLVMBasicBlock block)
+            {
+                foreach (var inst in block.Instructions)
+                {
+                    switch (inst)
+                    {
+                        case LLVMAddInst add:
+                            // Extremely simplified: (no register allocation). Emit 'xor eax,eax' as placeholder.
+                            writer.Write(new byte[] { 0x31, 0xC0 });
+                            break;
+                        case LLVMRetInst:
+                            // Handled in epilogue.
+                            break;
+                        case LLVMCallInst call:
+                            // Placeholder: call rel32 (dummy)
+                            writer.Write((byte)0xE8);
+                            writer.Write(0); // rel32 placeholder
+                            break;
+                        default:
+                            // Nop
+                            writer.Write((byte)0x90);
+                            break;
+                    }
+                }
+            }
+
+            private void EmitEpilogue(LLVMFunction fn)
+            {
+                // add rsp, 0x20
+                writer.Write(new byte[] { 0x48, 0x83, 0xC4, 0x20 });
+                // pop rbp
+                writer.Write((byte)0x5D);
+                // ret
+                writer.Write((byte)0xC3);
+            }
+        }
+        #endregion
+
+        #region OBJECT FILE & LINK (SIMPLIFIED PLACEHOLDERS)
+        public static class ObjectFileWriter
+        {
+            public static void WriteCOFF(MachineCodeModule module, string path, List<string> diagnostics)
+            {
+                try
+                {
+                    // For brevity we write raw machine code (not valid COFF). Replace with real COFF writer.
+                    File.WriteAllBytes(path, module.Bytes);
+                }
+                catch (Exception ex)
+                {
+                    diagnostics.Add("error: failed to write object file: " + ex.Message);
+                }
+            }
+        }
+
+        public sealed class LinkerOptions
+        {
+            public List<string> ObjectFiles { get; set; } = new();
+            public string OutputImage { get; set; } = "a.exe";
+        }
+
+        public static class LinkerDriver
+        {
+            public static bool TryLinkPE(LinkerOptions options, List<string> diagnostics)
+            {
+                try
+                {
+                    // Placeholder: simply concatenate objects; NOT a valid PE file.
+                    using var fs = new FileStream(options.OutputImage, FileMode.Create, FileAccess.Write);
+                    foreach (var obj in options.ObjectFiles)
+                        if (File.Exists(obj))
+                        {
+                            var data = File.ReadAllBytes(obj);
+                            fs.Write(data, 0, data.Length);
+                        }
+                    diagnostics.Add("warning: produced dummy executable (not a valid PE).");
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    diagnostics.Add("error: link failed: " + ex.Message);
+                    return false;
+                }
+            }
+        }
+        #endregion
+
+        #region RESULT TYPES
+        public sealed class NativeTranspilationResult
+        {
+            public bool Success { get; set; }
+            public List<string> Diagnostics { get; set; }
+            public PhoenixIRModule IR { get; set; }
+            public LLVMLikeModule LLVM { get; set; }
+            public MachineCodeModule MachineCode { get; set; }
+        }
+#endregion
+#endregion
+    
+        public CodeGenerator()
+        {
+            code = new StringBuilder();
+            labelCounter = 0;
+            variableOffsets = new Dictionary<string, int>();
+        }
+        public string Generate(ProgramNode program)
+        {
+            if (program == null) throw new ArgumentNullException(nameof(program));
+            // Initialize the scope and start code generation
+            currentScope = new Scope();
+            errors = new List<string>();
+            VisitProgram(program);
+            // Return the generated code
+            return code.ToString();
+        }
+        private void VisitProgram(ProgramNode program)
+        {
+            foreach (var declaration in program.Declarations)
+            {
+                if (declaration is FunctionDeclarationNode function)
+                {
+                    VisitFunctionDeclaration(function);
+                }
+                else if (declaration is VariableDeclarationNode variable)
+                {
+                    VisitVariableDeclaration(variable);
+                }
+                else
+                {
+                    errors.Add($"Unknown declaration type: {declaration.GetType().Name}");
+                }
+            }
+        }
+        private void VisitFunctionDeclaration(FunctionDeclarationNode function)
+        {
+            // Generate function header
+            code.AppendLine($"function {function.Name}({string.Join(", ", function.Parameters.Select(p => p.Name))}) {{");
+            currentScope = new Scope { Parent = currentScope };
+            // Generate local variable space
+            int localSpace = CalculateLocalVariableSpace(function.Body);
+            code.AppendLine($"  allocate {localSpace} bytes for locals;");
+            // Visit function body
+            VisitStatement(function.Body);
+            // End function
+            code.AppendLine("}");
+            currentScope = currentScope.Parent;
+        }
+        private void VisitVariableDeclaration(VariableDeclarationNode variable)
+        {
+            // Check if variable already defined in current scope
+            if (currentScope.Lookup(variable.Name) != null)
+            {
+                errors.Add($"Variable '{variable.Name}' already defined in this scope.");
+                return;
+            }
+            // Define the variable in the current scope
+            var symbol = new Symbol
+            {
+                Name = variable.Name,
+                Type = GetTypeName(variable.Type),
+                IsVariable = true,
+                Line = variable.Line,
+                Column = variable.Column
+            };
+            currentScope.Define(symbol);
+            // Generate code for variable initialization
+            code.AppendLine($"  var {variable.Name} : {symbol.Type} = {GetSecureDefaultValue(symbol.Type)};");
+        }
+        private string GetTypeName(TypeNode type)
+        {
+            // Convert TypeNode to string representation
+            return type switch
+            {
+                PrimitiveTypeNode p => p.Name,
+                PointerTypeNode ptr => $"{GetTypeName(ptr.BaseType)}*",
+                ReferenceTypeNode r => $"{GetTypeName(r.BaseType)}&",
+                ArrayTypeNode a => $"{GetTypeName(a.ElementType)}[]",
+                _ => "unknown"
+            };
+        }
+        private string GetSecureDefaultValue(string typeName)
+        {
+            // Return a secure default value based on the type
+            return typeName switch
+            {
+                "int" => "0",
+                "float" => "0.0",
+                "bool" => "false",
+                "char" => "'\\0'",
+                "string" => "\"\"",
+                _ => "null"
+            };
+        }
+        private int CalculateLocalVariableSpace(StatementNode body)
+        {
+            // Placeholder for calculating local variable space
+            // In a real implementation, this would analyze the body to determine offsets
+            return 64; // Assume 64 bytes for simplicity
+        }
+        private void VisitStatement(StatementNode statement)
+        {
+            // Visit different types of statements
+            switch (statement)
+            {
+                case ExpressionStatementNode exprStmt:
+                    VisitExpression(exprStmt.Expression);
+                    break;
+                case IfStatementNode ifStmt:
+                    VisitIfStatement(ifStmt);
+                    break;
+                case WhileStatementNode whileStmt:
+                    VisitWhileStatement(whileStmt);
+                    break;
+                case ReturnStatementNode returnStmt:
+                    VisitReturnStatement(returnStmt);
+                    break;
+                default:
+                    errors.Add($"Unknown statement type: {statement.GetType().Name}");
+                    break;
+            }
+        }
+        private void VisitIfStatement(IfStatementNode ifStmt)
+        {
+            code.AppendLine("  if (");
+            VisitExpression(ifStmt.Condition);
+            code.AppendLine(") {");
+            currentScope = new Scope { Parent = currentScope };
+            VisitStatement(ifStmt.ThenBranch);
+            currentScope = currentScope.Parent;
+            code.AppendLine("  }");
+            if (ifStmt.ElseBranch != null)
+            {
+                code.AppendLine("  else {");
+                currentScope = new Scope { Parent = currentScope };
+                VisitStatement(ifStmt.ElseBranch);
+                currentScope = currentScope.Parent;
+                code.AppendLine("  }");
+            }
+        }
+        private void VisitWhileStatement(WhileStatementNode whileStmt)
+        {
+            code.AppendLine("  while (");
+            VisitExpression(whileStmt.Condition);
+            code.AppendLine(") {");
+            currentScope = new Scope { Parent = currentScope };
+            VisitStatement(whileStmt.Body);
+            currentScope = currentScope.Parent;
+            code.AppendLine("  }");
+        }
+        private void VisitReturnStatement(ReturnStatementNode returnStmt)
+        {
+            code.AppendLine("  return ");
+            if (returnStmt.Value != null)
+            {
+                VisitExpression(returnStmt.Value);
+            }
+            else
+            {
+                code.Append("void");
+            }
+            code.AppendLine(";");
+        }
+        private void VisitExpression(ExpressionNode expression)
+        {
+            // Generate code for different types of expressions
+            switch (expression)
+            {
+                case LiteralExpressionNode literal:
+                    code.Append(literal.Value.ToString());
+                    break;
+                case VariableExpressionNode variable:
+                    code.Append(variable.Name);
+                    break;
+                case BinaryExpressionNode binary:
+                    VisitBinaryExpression(binary);
+                    break;
+                case FunctionCallExpressionNode call:
+                    VisitFunctionCall(call);
+                    break;
+                default:
+                    errors.Add($"Unknown expression type: {expression.GetType().Name}");
+                    break;
+            }
+        }
+        private void VisitBinaryExpression(BinaryExpressionNode binary)
+        {
+            code.Append("(");
+            VisitExpression(binary.Left);
+            code.Append($" {binary.Operator} ");
+            VisitExpression(binary.Right);
+            code.Append(")");
+        }
+        private void VisitFunctionCall(FunctionCallExpressionNode call)
+        {
+            code.Append($"{call.FunctionName}(");
+            for (int i = 0; i < call.Arguments.Count; i++)
+            {
+                VisitExpression(call.Arguments[i]);
+                if (i < call.Arguments.Count - 1)
+                    code.Append(", ");
+            }
+            code.Append(")");
+        }
+        private void VisitMemberAccess(MemberAccessExpressionNode member)
+        {
+            // Generate code for member access (e.g., obj.member)
+            VisitExpression(member.Object);
+            code.Append($".{member.MemberName}");
+        }
+        private void VisitAssignment(AssignmentExpressionNode assignment)
+        {
+            // Generate code for assignment (e.g., x = y)
+            VisitExpression(assignment.Left);
+            code.Append(" = ");
+            VisitExpression(assignment.Right);
+            code.AppendLine(";");
+        }
+        public NativeTranspilationResult GenerateNativeCode(ProgramNode program, OptimizationLevelOpt optimizationLevel)
+        {
+            var diagnostics = new List<string>();
+            var irModule = new PhoenixIRBuilder(diagnostics).Build(program);
+            var llvmModule = new LLVMLikeModule("llvm_module", PhoenixIntrinsicRegistry.CreateDefault(), diagnostics);
+            var irToLlvm = new IRToLLVMLowering(PhoenixIntrinsicRegistry.CreateDefault(), diagnostics);
+            irToLlvm.Lower(irModule, llvmModule);
+            var llvmOptimizer = new LLVMOptimizationPipeline(diagnostics, optimizationLevel);
+            llvmOptimizer.Run(llvmModule);
+            var x64Emitter = new X64WindowsEmitter(diagnostics, new X64EmitterOptions());
+            var mc = x64Emitter.Emit(llvmModule);
+            return new NativeTranspilationResult
+            {
+                Success = !diagnostics.Any(),
+                Diagnostics = diagnostics,
+                IR = irModule,
+                LLVM = llvmModule,
+                MachineCode = mc
+            };
+        }
+        private Scope currentScope;
+        private StringBuilder code;
+        private List<string> errors;
+        private int labelCounter;
+        private Dictionary<string, int> variableOffsets;
+        public class Scope
+        {
+            public Scope Parent { get; set; }
+            private readonly Dictionary<string, Symbol> symbols = new(StringComparer.OrdinalIgnoreCase);
+            public void Define(Symbol symbol)
+            {
+                if (symbols.ContainsKey(symbol.Name))
+                    throw new InvalidOperationException($"Symbol '{symbol.Name}' already defined in this scope.");
+                symbols[symbol.Name] = symbol;
+            }
+            public Symbol Lookup(string name)
+            {
+                if (symbols.TryGetValue(name, out var symbol))
+                    return symbol;
+                return Parent?.Lookup(name);
+            }
+        }
+        public class Symbol
+        {
+            public string Name { get; set; }
+            public string Type { get; set; }
+            public bool IsFunction { get; set; }
+            public bool IsVariable { get; set; }
+            public bool IsType { get; set; }
+            public int Line { get; set; }
+            public int Column { get; set; }
+            public List<ParameterNode> Parameters { get; set; } = new List<ParameterNode>();
+        }
+        public class NativeTranspilationResult
+        {
+            public bool Success { get; set; }
+            public List<string> Diagnostics { get; set; }
+            public PhoenixIRModule IR { get; set; }
+            public LLVMLikeModule LLVM { get; set; }
+            public MachineCodeModule MachineCode { get; set; }
+        }
+        public enum OptimizationLevelOpt
+        {
+            O0, // No optimization
+            O1, // Basic optimizations
+            O2, // More aggressive optimizations
+            O3  // Full optimization
+        }
+        public class PhoenixIRModule
+        {
+            public string Name { get; set; }
+            public List<PhoenixIRFunction> Functions { get; } = new();
+            public List<PhoenixIRGlobal> Globals { get; } = new();
+            public PhoenixIRModule(string name) => Name = name;
+        }
+        public class PhoenixIRFunction
+        {
+            public string Name { get; set; }
+            public string ReturnType { get; set; }
+            public bool IsExternal { get; set; }
+            public List<(string type, string name)> Parameters { get; } = new();
+            public List<PhoenixIRBlock> Blocks { get; } = new();
+        }
+        public class PhoenixIRBlock
+        {
+            public string Label { get; set; }
+            public List<PhoenixIRInst> Instructions { get; } = new();
+        }
+        public abstract class PhoenixIRInst
+        {
+            public abstract string OpCode { get; }
+        }
+        public class IRConst : PhoenixIRInst
+        {
+            public string ConstType { get; set; }
+            public object ConstValue { get; set; }
+            public string Result { get; set; }
+            public override string OpCode => "const";
+        }
+        public class IRReturn : PhoenixIRInst
+        {
+            public string Value { get; set; }
+            public override string OpCode => "return";
+        }
+        public class IRStore : PhoenixIRInst
+        {
+            public string Address { get; set; }
+            public string Value { get; set; }
+            public override string OpCode => "store";
+        }
+        public class IRLoad : PhoenixIRInst
+        {
+            public string Result { get; set; }
+            public string Address { get; set; }
+            public override string OpCode => "load";
+        }
+        public class IRBinOp : PhoenixIRInst
+        {
+            public string Op { get; set; }
+            public string Left { get; set; }
+            public string Right { get; set; }
+            public string Result { get; set; }
+            public override string OpCode => "binop";
+        }
+        public class IRCall : PhoenixIRInst
+        {
+            public string Callee { get; set; }
+            public string Result { get; set; }
+            public List<string> Args { get; } = new();
+            public override string OpCode => "call";
+        }
+        public class IRAlloca : PhoenixIRInst
+        {
+            public string AllocType { get; set; }
+            public string Result { get; set; }
+            public override string OpCode => "alloca";
+        }
+        public class IRBranch : PhoenixIRInst
+        {
+            public string Target { get; set; }
+            public override string OpCode => "branch";
+        }
+        public class IRBranchCond : PhoenixIRInst
+        {
+            public string Condition { get; set; }
+            public string TrueTarget { get; set; }
+            public string FalseTarget { get; set; }
+            public override string OpCode => "branch_cond";
+        }
+        public class PhoenixIRGlobal
+        {
+            public string Name { get; set; }
+            public string Type { get; set; }
+            public object InitialValue { get; set; }
+        }
+        public class PhoenixIRBuilder
+        {
+            private readonly List<string> diagnostics;
+            public PhoenixIRBuilder(List<string> diagnostics)
+            {
+                this.diagnostics = diagnostics;
+            }
+            public PhoenixIRModule Build(ProgramNode program)
+            {
+                var module = new PhoenixIRModule("main");
+                foreach (var decl in program.Declarations)
+                {
+                    if (decl is FunctionDeclarationNode func)
+                        module.Functions.Add(BuildFunction(func));
+                    else if (decl is VariableDeclarationNode var)
+                        module.Globals.Add(BuildGlobal(var));
+                    else
+                        diagnostics.Add($"warning: unhandled declaration type '{decl.GetType().Name}'");
+                }
+                return module;
+            }
+            private PhoenixIRFunction BuildFunction(FunctionDeclarationNode func)
+            {
+                var irFunc = new PhoenixIRFunction { Name = func.Name, ReturnType = GetTypeName(func.ReturnType) };
+                foreach (var param in func.Parameters)
+                    irFunc.Parameters.Add((GetTypeName(param.Type), param.Name));
+                // Placeholder for function body
+                irFunc.Blocks.Add(new PhoenixIRBlock { Label = "entry" });
+                return irFunc;
+            }
+            private PhoenixIRGlobal BuildGlobal(VariableDeclarationNode var)
+            {
+                return new PhoenixIRGlobal { Name = var.Name, Type = GetTypeName(var.Type), InitialValue = var.InitialValue };
+            }
+            private string GetTypeName(TypeNode type)
+            {
+                // Convert TypeNode to string representation
+                return type switch
+                {
+                    PrimitiveTypeNode p => p.Name,
+                    PointerTypeNode ptr => $"{GetTypeName(ptr.BaseType)}*",
+                    ReferenceTypeNode r => $"{GetTypeName(r.BaseType)}&",
+                    ArrayTypeNode a => $"{GetTypeName(a.ElementType)}[]",
+                    _ => "unknown"
+                };
+            }
+        }
+        public sealed class LLVMLikeModule
+        {
+            public string Name { get; }
+            public List<LLVMFunction> Functions { get; } = new();
+            public List<LLVMGlobal> Globals { get; } = new();
+            public PhoenixIntrinsicRegistry Intrinsics { get; }
+            public List<string> Diagnostics { get; }
+            public LLVMLikeModule(string name, PhoenixIntrinsicRegistry intrinsics, List<string> diagnostics)
+            {
+                Name = name;
+                Intrinsics = intrinsics;
+                Diagnostics = diagnostics;
+            }
+        }
+        public abstract class LLVMInst
+        {
+            public abstract string Mnemonic { get; }
+        }
+        public sealed class LLVMFunction
+        {
+            public string Name { get; set; }
+            public string ReturnType { get; set; }
+            public List<string> Parameters { get; } = new();
+            public List<LLVMBasicBlock> Blocks { get; } = new();
+        }
+        public sealed class LLVMBasicBlock
+        {
+            public string Label { get; set; }
+            public List<LLVMInst> Instructions { get; } = new();
+        }
+        public sealed class LLVMAddInst : LLVMInst
+        {
+            public string Dest { get; set; }
+            public string Left { get; set; }
+            public string Right { get; set; }
+            public override string Mnemonic => "add";
+        }
+        public sealed class LLVMRetInst : LLVMInst
+        {
+            public string Value { get; set; }
+            public override string Mnemonic => "ret";
+        }
+        public sealed class LLVMStoreInst : LLVMInst
+        {
+            public string Address { get; set; }
+            public string Value { get; set; }
+            public override string Mnemonic => "store";
+        }
+        public sealed class LLVMLoadInst : LLVMInst
+        {
+            public string Dest { get; set; }
+            public string Address { get; set; }
+            public override string Mnemonic => "load";
+        }
+        public sealed class LLVMCallInst : LLVMInst
+        {
+            public string Callee { get; set; }
+            public string Dest { get; set; }
+            public List<string> Args { get; } = new();
+            public override string Mnemonic => "call";
+        }
+        public sealed class LLVMOptimizationPipeline
+        {
+            private readonly List<string> diagnostics;
+            private readonly OptimizationLevelOpt level;
+            public LLVMOptimizationPipeline(List<string> diagnostics, OptimizationLevelOpt level)
+            {
+                this.diagnostics = diagnostics;
+                this.level = level;
+            }
+            public void Run(LLVMLikeModule module)
+            {
+                if (level == OptimizationLevelOpt.O0) return;
+                // Placeholder for optimization passes
+                ConstantCombine(module);
+                DeadInstElim(module);
+                Peephole(module);
+            }
+            private void ConstantCombine(LLVMLikeModule m) { /* placeholder */ }
+            private void DeadInstElim(LLVMLikeModule m) { /* placeholder */ }
+            private void Peephole(LLVMLikeModule m) { /* placeholder */ }
+        }
+        public class IRToLLVMLowering
+        {
+            private readonly PhoenixIntrinsicRegistry intrinsics;
+            private readonly List<string> diagnostics;
+            public IRToLLVMLowering(PhoenixIntrinsicRegistry intrinsics, List<string> diagnostics)
+            {
+                this.intrinsics = intrinsics;
+                this.diagnostics = diagnostics;
+            }
+            public void Lower(PhoenixIRModule irModule, LLVMLikeModule llvmModule)
+            {
+                foreach (var irFunc in irModule.Functions)
+                {
+                    var llvmFunc = new LLVMFunction
+                    {
+                        Name = irFunc.Name,
+                        ReturnType = irFunc.ReturnType
+                    };
+                    foreach (var param in irFunc.Parameters)
+                        llvmFunc.Parameters.Add(param.name);
+                    llvmModule.Functions.Add(llvmFunc);
+                    LowerBlocks(irFunc.Blocks, llvmFunc);
+                }
+            }
+            private void LowerBlocks(List<PhoenixIRBlock> blocks, LLVMFunction llvmFunc)
+            {
+                foreach (var block in blocks)
+                {
+                    var llvmBlock = new LLVMBasicBlock { Label = block.Label };
+                    llvmFunc.Blocks.Add(llvmBlock);
+                    LowerInstructions(block.Instructions, llvmBlock);
+                }
+            }
+            private void LowerInstructions(List<PhoenixIRInst> instructions, LLVMBasicBlock block)
+            {
+                foreach (var ir in instructions)
+                {
+                    switch (ir)
+                    {
+                        case IRConst c:
+                            block.Instructions.Add(new LLVMAddInst
+                            {
+                                Dest = c.Result,
+                                Left = c.ConstValue.ToString(),
+                                Right = "0" // Placeholder for constant value
+                            });
+                            break;
+                            case IRReturn r:
+                            block.Instructions.Add(new LLVMRetInst { Value = r.Value });
+                            break;
+                            case IRStore s:
+                            block.Instructions.Add(new LLVMStoreInst
+                            {
+                                Address = s.Address,
+                                Value = s.Value
+                            });
+                            break;
+                            case IRLoad l:
+
+                            block.Instructions.Add(new LLVMLoadInst
+                            {
+                                Dest = l.Result,
+                                Address = l.Address
+                            });
+                            break;
+                            case IRBinOp b:
+                            block.Instructions.Add(new LLVMAddInst
+                            {
+                                Dest = b.Result,
+                                Left = b.Left,
+                                Right = b.Right
+                            });
+                            break;
+                            case IRCall call:
+                            var llvmCall = new LLVMCallInst
+                            {
+                                Callee = call.Callee,
+                                Dest = call.Result
+                            };  
+                            llvmCall.Args.AddRange(call.Args);
+                            block.Instructions.Add(llvmCall);
+                            break;
+                            case IRAlloca a:
+                            block.Instructions.Add(new LLVMInst
+                            {
+                                Mnemonic = "alloca",
+                                Dest = a.Result,
+                                Type = a.AllocType
+                            });
+                            break;
+                            case IRBranch br:
+                            block.Instructions.Add(new LLVMInst
+                            {
+                                Mnemonic = "branch",
+                                Target = br.Target
+                            });
+                            break;
+                            case IRBranchCond bc:
+                            block.Instructions.Add(new LLVMInst
+                            {
+                                Mnemonic = "branch_cond",
+                                Condition = bc.Condition,
+                                TrueTarget = bc.TrueTarget,
+                                FalseTarget = bc.FalseTarget
+                            });
+                            break;
+                            default:
+                            diagnostics.Add($"warning: unhandled IR instruction '{ir.OpCode}'");
+                            break;
+                    }
+                }
+            }
+        }
+        //         private string VisitUnaryExpression(UnaryExpressionNode unary)
+        {
+            string operandType = VisitExpression(unary.Operand);
+            switch (unary.Operator)
+            {
+                case TokenType.Plus:
+                case TokenType.Minus:
+                    if (operandType == "int" || operandType == "float")
+                        return operandType;
+                    errors.Add($"Line {unary.Line}: Invalid type for unary operation '{unary.Operator}' ({operandType})");
+                    return "error";
+                case TokenType.Not:
+                    if (operandType == "bool")
+                        return "bool";
+                    errors.Add($"Line {unary.Line}: Logical negation requires boolean operand, got '{operandType}'");
+                    return "error";
+                default:
+                    errors.Add($"Line {unary.Line}: Unknown unary operator '{unary.Operator}'");
+                    return "error";
+            }
+}
+//         private string VisitBinaryExpression(BinaryExpressionNode binary)
+        {
+            string leftType = VisitExpression(binary.Left);
+            string rightType = VisitExpression(binary.Right);
+            switch (binary.Operator)
+            {
+                case TokenType.Plus:
+                case TokenType.Minus:
+                case TokenType.Multiply:
+                case TokenType.Divide:
+                case TokenType.Modulo:
+                    if (leftType == "int" && rightType == "int")
+                        return "int";
+                    if (leftType == "float" || rightType == "float")
+                        return "float";
+                    errors.Add($"Line {binary.Line}: Invalid types for binary operation '{binary.Operator}' ({leftType}, {rightType})");
+                    return "error";
+                case TokenType.Equal:
+                case TokenType.NotEqual:
+                    if (leftType == rightType || leftType == "null" || rightType == "null")
+                        return "bool";
+                    errors.Add($"Line {binary.Line}: Cannot compare types '{leftType}' and '{rightType}'");
+                    return "error";
+                case TokenType.Greater:
+                case TokenType.GreaterEqual:
+                case TokenType.Less:
+                case TokenType.LessEqual:
+                    if ((leftType == "int" || leftType == "float") && (rightType == "int" || rightType == "float"))
+                        return "bool";
+                    errors.Add($"Line {binary.Line}: Invalid comparison between '{leftType}' and '{rightType}'");
+                    return "error";
+                case TokenType.And:
+                case TokenType.Or:
+                    if (leftType == "bool" && rightType == "bool")
+                        return "bool";
+                    errors.Add($"Line {binary.Line}: Logical operation '{binary.Operator}' requires boolean operands");
+                    return "error";
+                default:
+                    errors.Add($"Line {binary.Line}: Unknown binary operator '{binary.Operator}'");
+                    return "error";
+            }
+}
+        private string VisitExpression(ExpressionNode expression)
+        {
+            // This method should be implemented to handle different expression types
+            // For simplicity, we assume all expressions return "int" for now
+            if (expression is LiteralExpressionNode literal)
+            {
+                return literal.Type; // e.g., "int", "float", etc.
+            }
+            else if (expression is VariableExpressionNode variable)
+            {
+                var symbol = currentScope.Lookup(variable.Name);
+                if (symbol != null)
+                    return symbol.Type;
+                errors.Add($"Line {variable.Line}: Undefined variable '{variable.Name}'");
+                return "error";
+            }
+            else if (expression is BinaryExpressionNode binary)
+            {
+                return VisitBinaryExpression(binary);
+            }
+            else if (expression is UnaryExpressionNode unary)
+            {
+                return VisitUnaryExpression(unary);
+            }
+            else
+            {
+                errors.Add($"Line {expression.Line}: Unknown expression type '{expression.GetType().Name}'");
+                return "error";
+            }
+}
+                var functionSymbol = currentScope.Lookup(funcId.Name);
+                if (functionSymbol == null || !functionSymbol.IsFunction)
+                {
+                    errors.Add($"Line {funcId.Line}: Undefined function '{funcId.Name}'");
+                    return "error";
+                }
+                // Check argument types
+                for (int i = 0; i < call.Arguments.Count; i++)
+                {
+                    var argType = VisitExpression(call.Arguments[i]);
+                    if (i < functionSymbol.Parameters.Count)
+                    {
+                        var paramType = functionSymbol.Parameters[i].Type;
+                        if (argType != paramType && !(argType == "null" && paramType.EndsWith("?")))
+                        {
+                            errors.Add($"Line {call.Line}: Argument {i + 1} type mismatch: expected '{paramType}', got '{argType}'");
+                            return "error";
+                        }
+                    }
+                    else
+                    {
+                        errors.Add($"Line {call.Line}: Too many arguments for function '{funcId.Name}'");
+                        return "error";
+                    }
+                }
+                // Return the function's return type
+                return functionSymbol.ReturnType;
+            }
+            errors.Add($"Line {call.Line}: Invalid function call expression");
+            return "error";
+        }
+        public string GenerateCode(ProgramNode program)
+        {
+            if (program == null) throw new ArgumentNullException(nameof(program));
+            code = new StringBuilder();
+            labelCounter = 0;
+            variableOffsets = new Dictionary<string, int>();
+            // Check for null program
+            if (program == null || program.Declarations == null || !program.Declarations.Any())
+            {
+                errors.Add("Program is empty or has no declarations.");
+                return "error";
+    }
+            // Initialize the global scope
+            currentScope = new Scope();
+            errors = new List<string>();
+            // Visit each declaration in the program
+            foreach (var declaration in program.Declarations)
+            {
+                if (declaration is FunctionDeclarationNode functi
+            on)
+                {
+                    VisitFunctionDeclaration(function);
+                }
+                else if (declaration is VariableDeclarationNode variable)
+                {
+                    VisitVariableDeclaration(variable);
+                }
+                else
+                {
+                    // Handle other declaration types if needed
+                    errors.Add($"Line {declaration.Line}: Unknown declaration type '{declaration.GetType().Name}'");
+        }
+                }
+            // Return the generated code as a string
+            return code.ToString();
+}
+        private void VisitFunctionDeclaration(FunctionDeclarationNode function)
+        {
+            // Check if function already defined in current scope
+            if (currentScope.Lookup(function.Name) != null)
+            {
+                errors.Add($"Function '{function.Name}' already defined in this scope.");
+                return;
+            }
+            // Define the function in the current scope
+            var symbol = new Symbol
+            {
+                Name = function.Name,
+                Type = GetTypeName(function.ReturnType),
+                IsFunction = true,
+                Line = function.Line,
+                Column = function.Column
+            };
+            foreach (var param in function.Parameters)
+            {
+                symbol.Parameters.Add(new ParameterNode
+                {
+                    Name = param.Name,
+                    Type = GetTypeName(param.Type)
+                });
+            }
+            currentScope.Define(symbol);
+            // Generate code for function header
+            code.AppendLine($"function {function.Name}(");
+            foreach (var param in function.Parameters)
+            {
+                code.Append($"  {param.Name}: {GetTypeName(param.Type)}, ");
+            }
+            code.AppendLine($") -> {symbol.Type} {{");
+            // Allocate space for local variables
+            int localVarSpace = CalculateLocalVariableSpace(function.Body);
+            code.AppendLine($"  var localSpace: int = {localVarSpace};");
+            // Generate code for the function body
+            currentScope = new Scope { Parent = currentScope };
+            foreach (var statement in function.Body.Statements)
+            {
+                VisitStatement(statement);
+    }
+            currentScope = currentScope.Parent;
+            code.AppendLine("}");
+        }
+        private void VisitVariableDeclaration(VariableDeclarationNode variable)
+        {
+            // Check if variable already defined in current scope
+            if (currentScope.Lookup(variable.Name) != null)
+            {
+                errors.Add($"Variable '{variable.Name}' already defined in this scope.");
+                return;
+            }
+            // Define the variable in the current scope
+            var symbol = new Symbol
+            {
+                Name = variable.Name,
+                Type = GetTypeName(variable.Type),
+                IsVariable = true,
+                Line = variable.Line,
+                Column = variable.Column
+            };
+            currentScope.Define(symbol);
+            // Generate code for variable declaration
+            code.AppendLine($"var {variable.Name}: {symbol.Type} = {GetDefaultValue(symbol.Type)};");
+        }
+        private string GetTypeName(TypeNode type)
+        {
+            // Convert TypeNode to string representation
+            return type switch
+            {
+                PrimitiveTypeNode p => p.Name,
+                PointerTypeNode ptr => $"{GetTypeName(ptr.BaseType)}*",
+                ReferenceTypeNode r => $"{GetTypeName(r.BaseType)}&",
+                ArrayTypeNode a => $"{GetTypeName(a.ElementType)}[]",
+                _ => "unknown"
+            };
+        }
+        private string GetDefaultValue(string type)
+        {
+            return type switch
+            {
+                "int" => "0",
+                "float" => "0.0",
+                "bool" => "false",
+                "char" => "'\\0'",
+                "string" => "\"\"",
+                "null" => "null",
+                _ => "undefined"
+            };
+}
+        private int CalculateLocalVariableSpace(BlockNode body)
+        {
+            // Calculate the space needed for local variables in the function body
+            int space = 0;
+            foreach (var statement in body.Statements)
+            {
+                if (statement is VariableDeclarationNode varDecl)
+                {
+                    space += GetTypeSize(varDecl.Type);
+                }
+            }
+            return space;
+        }
+        private int GetTypeSize(TypeNode type)
+        {
+            // Return size of the type in bytes
+            return type switch
+            {
+                PrimitiveTypeNode p when p.Name == "int" => 4,
+                PrimitiveTypeNode p when p.Name == "float" => 4,
+                PrimitiveTypeNode p when p.Name == "bool" => 1,
+                PrimitiveTypeNode p when p.Name == "char" => 1,
+                _ => 8 // Default size for pointers and other types
+            };
+        }
+        private void VisitStatement(StatementNode statement)
+        {
+            // Generate code for different types of statements
+            switch (statement)
+            {
+                case IfStatementNode ifStmt:
+                    VisitIfStatement(ifStmt);
+                    break;
+                case WhileStatementNode whileStmt:
+                    VisitWhileStatement(whileStmt);
+                    break;
+                case ReturnStatementNode returnStmt:
+                    VisitReturnStatement(returnStmt);
+                    break;
+                case ExpressionStatementNode exprStmt:
+                    VisitExpression(exprStmt.Expression);
+                    code.AppendLine(";");
+                    break;
+                default:
+                    errors.Add($"Unknown statement type: {statement.GetType().Name}");
+                    break;
+            }
+        }
+        private void VisitIfStatement(IfStatementNode ifStmt)
+        {
+            code.Append("if (");
+            VisitExpression(ifStmt.Condition);
+            code.AppendLine(") {");
+            currentScope = new Scope { Parent = currentScope };
+            VisitStatement(ifStmt.ThenBranch);
+            currentScope = currentScope.Parent;
+            code.AppendLine("}");
+            if (ifStmt.ElseBranch != null)
+            {
+                code.AppendLine("else {");
+                currentScope = new Scope { Parent = currentScope };
+                VisitStatement(ifStmt.ElseBranch);
+                currentScope = currentScope.Parent;
+                code.AppendLine("}");
+    }
+            }
+        private void VisitWhileStatement(WhileStatementNode whileStmt)
+        {
+            code.Append("while (");
+            VisitExpression(whileStmt.Condition);
+            code.AppendLine(") {");
+            currentScope = new Scope { Parent = currentScope };
+            VisitStatement(whileStmt.Body);
+            currentScope = currentScope.Parent;
+            code.AppendLine("}");
+        }
+        private void VisitReturnStatement(ReturnStatementNode returnStmt)
+        {
+            code.Append("return ");
+            if (returnStmt.Value != null)
+            {
+                VisitExpression(returnStmt.Value);
+            }
+            else
+            {
+                code.Append("void");
+            }
+            code.AppendLine(";");
+        }
+        private void VisitExpression(ExpressionNode expression)
+        {
+            // Generate code for different types of expressions
+            switch (expression)
+            {
+                case LiteralExpressionNode literal:
+                    code.Append(literal.Value);
+                    break;
+                case VariableExpressionNode variable:
+                    code.Append(variable.Name);
+                    break;
+                case BinaryExpressionNode binary:
+                    VisitBinaryExpression(binary);
+                    break;
+                case UnaryExpressionNode unary:
+                    VisitUnaryExpression(unary);
+                    break;
+                case FunctionCallExpressionNode call:
+                    VisitFunctionCall(call);
+                    break;
+                case MemberAccessExpressionNode member:
+                    VisitMemberAccess(member);
+                    break;
+                case AssignmentExpressionNode assignment:
+                    VisitAssignment(assignment);
+                    break;
+                default:
+                    errors.Add($"Unknown expression type: {expression.GetType().Name}");
+                    break;
+            }
+}
+        private string VisitUnaryExpression(UnaryExpressionNode unary)
+        {
+            string operandType = VisitExpression(unary.Operand);
+            switch (unary.Operator)
+            {
+                case TokenType.Plus:
+                case TokenType.Minus:
+                    if (operandType == "int" || operandType == "float")
+                        return operandType;
+                    errors.Add($"Line {unary.Line}: Invalid type for unary operation '{unary.Operator}' ({operandType})");
+                    return "error";
+                case TokenType.Not:
+                    if (operandType == "bool")
+                        return "bool";
+                    errors.Add($"Line {unary.Line}: Logical negation requires boolean operand, got '{operandType}'");
+                    return "error";
+                case TokenType.BitwiseNot:
+                    if (operandType == "int")
+                        return "int";
+                    errors.Add($"Line {unary.Line}: Bitwise NOT operator requires integer operand, got '{operandType}'");
+                    return "error";
+                case TokenType.Negate:
+                    if (operandType == "int" || operandType == "float")
+                        return operandType;
+                    errors.Add($"Line {unary.Line}: '-' operator requires numeric operand, got '{operandType}'");
+                    return "error";
+                default:
+                    errors.Add($"Line {unary.Line}: Unknown unary operator '{unary.Operator}'");
+                    return "error";
+    }
+        private string VisitBinaryExpression(BinaryExpressionNode binary)
+        {
+            string leftType = VisitExpression(binary.Left);
+            string rightType = VisitExpression(binary.Right);
+            switch (binary.Operator)
+            {
+                case TokenType.Plus:
+                case TokenType.Minus:
+                case TokenType.Multiply:
+                case TokenType.Divide:
+                case TokenType.Modulo:
+                    if (leftType == "int" && rightType == "int")
+                        return "int";
+                    if (leftType == "float" || rightType == "float")
+                        return "float";
+                    errors.Add($"Line {binary.Line}: Invalid types for binary operation '{binary.Operator}' ({leftType}, {rightType})");
+                    return "error";
+                case TokenType.Equal:
+                case TokenType.NotEqual:
+                    if (leftType == rightType || leftType == "null" || rightType == "null")
+                        return "bool";
+                    errors.Add($"Line {binary.Line}: Cannot compare types '{leftType}' and '{rightType}'");
+                    return "error";
+                case TokenType.Greater:
+                case TokenType.GreaterEqual:
+                case TokenType.Less:
+                case TokenType.LessEqual:
+                    if ((leftType == "int" || leftType == "float") && (rightType == "int" || rightType == "float"))
+                        return "bool";
+                    errors.Add($"Line {binary.Line}: Invalid comparison between '{leftType}' and '{rightType}'");
+                    return "error";
+                case TokenType.And:
+                case TokenType.Or:
+                    if (leftType == "bool" && rightType == "bool")
+                        return "bool";
+                    errors.Add($"Line {binary.Line}: Logical operation '{binary.Operator}' requires boolean operands");
+                    return "error";
+                case TokenType.BitwiseAnd:
+                case TokenType.BitwiseOr:
+                    if (leftType == "int" && rightType == "int")
+                        return "int";
+                    errors.Add($"Line {binary.Line}: Bitwise operation '{binary.Operator}' requires integer operands");
+                    return "error";
+                case TokenType.BitwiseXor:
+
+                    if (leftType == "int" && rightType == "int")
+                        return "int";
+                    errors.Add($"Line {binary.Line}: Bitwise XOR operation requires integer operands");
+                    return "error";
+                default:
+                    errors.Add($"Line {binary.Line}: Unknown binary operator '{binary.Operator}'");
+                    return "error";
+    }
+        }
+        private string VisitFunctionCall(FunctionCallExpressionNode call)
+        {
+            if (call == null) throw new ArgumentNullException(nameof(call));
+            if (call.FunctionId is VariableExpressionNode funcId)
+            {
+                // Check if the function is defined in the current scope
+                if (funcId.Name == "print")
+                {
+                    // Special case for print function
+                    foreach (var arg in call.Arguments)
+                    {
+                        var argType = VisitExpression(arg);
+                        if (argType != "int" && argType != "float" && argType != "string" && argType != "bool")
+                        {
+                            errors.Add($"Line {call.Line}: Invalid argument type '{argType}' for print function");
+                            return "error";
+                        }
+                    }
+                    code.Append("print(");
+                    for (int i = 0; i < call.Arguments.Count; i++)
+                    {
+                        if (i > 0) code.Append(", ");
+                        code.Append(VisitExpression(call.Arguments[i]));
+                    }
+                    code.AppendLine(");");
+                    return "void";
+        }
+                var functionSymbol = currentScope.Lookup(funcId.Name);
+                if (functionSymbol == null || !functionSymbol.IsFunction)
+                {
+                    errors.Add($"Line {call.Line}: Undefined function '{funcId.Name}'");
+                    return "error";
+                }
+                // Check argument count
+                if (call.Arguments.Count != functionSymbol.Parameters.Count)
+                {
+                    errors.Add($"Line {call.Line}: Function '{funcId.Name}' expects {functionSymbol.Parameters.Count} arguments, got {call.Arguments.Count}");
+                    return "error";
+                }
+                // Check argument types
+                for (int i = 0; i < call.Arguments.Count; i++)
+                {
+                    var argType = VisitExpression(call.Arguments[i]);
+                    if (argType != functionSymbol.Parameters[i].Type && !(argType == "null" && functionSymbol.Parameters[i].Type.EndsWith("?")))
+                    {
+                        errors.Add($"Line {call.Line}: Argument {i + 1} type mismatch: expected '{functionSymbol.Parameters[i].Type}', got '{argType}'");
+                        return "error";
+                    }
+                }
+                // Return the function's return type
+                return functionSymbol.ReturnType;
+            }
+            errors.Add($"Line {call.Line}: Invalid function call expression");
+            return "error";
+}
+        private string VisitMemberAccess(MemberAccessExpressionNode member)
+        {
+            // Check if the member access is valid
+            var objectType = VisitExpression(member.Object);
+            if (objectType == "error")
+            {
+                errors.Add($"Line {member.Line}: Invalid object type for member access");
+                return "error";
+            }
+            // Check if the member exists in the object's type
+            var symbol = currentScope.Lookup(member.MemberName);
+            if (symbol == null || !symbol.IsVariable)
+            {
+                errors.Add($"Line {member.Line}: Undefined member '{member.MemberName}' in type '{objectType}'");
+                return "error";
+            }
+            return symbol.Type;
+        }
+        private string VisitAssignment(AssignmentExpressionNode assignment)
+        {
+            // Check if the left-hand side is a valid variable or property
+            var leftType = VisitExpression(assignment.Left);
+            var rightType = VisitExpression(assignment.Right);
+            if (leftType == "error" || rightType == "error")
+            {
+                errors.Add($"Line {assignment.Line}: Invalid assignment expression");
+                return "error";
+            }
+            // Check type compatibility
+            if (!IsAssignableType(leftType, rightType))
+            {
+                errors.Add($"Line {assignment.Line}: Cannot assign '{rightType}' to '{leftType}'");
+                return "error";
+            }
+            code.Append($"{assignment.Left} = {assignment.Right};");
+            return leftType;
+        }
+        private bool IsAssignableType(string targetType, string sourceType)
+        {
+            // Check if source type can be assigned to target type
+            if (targetType == sourceType) return true;
+            if (targetType.EndsWith("?") && sourceType == "null") return true; // Nullable types
+            return false; // Add more rules as needed
+}
+//         private string VisitUnaryExpression(UnaryExpressionNode unary)
+        private string VisitUnaryExpression(UnaryExpressionNode unary)
+        {
+            string operandType = VisitExpression(unary.Operand);
+            switch (unary.Operator)
+            {
+                case TokenType.Plus:
+                case TokenType.Minus:
+                    if (operandType == "int" || operandType == "float")
+                        return operandType;
+                    errors.Add($"Line {unary.Line}: Invalid type for unary operation '{unary.Operator}' ({operandType})");
+                    return "error";
+                case TokenType.Not:
+                    if (operandType == "bool")
+                        return "bool";
+                    errors.Add($"Line {unary.Line}: Logical negation requires boolean operand, got '{operandType}'");
+                    return "error";
+                case TokenType.BitwiseNot:
+                    if (operandType == "int")
+                        return "int";
+                    errors.Add($"Line {unary.Line}: Bitwise NOT operator requires integer operand, got '{operandType}'");
+                    return "error";
+                default:
+                    errors.Add($"Line {unary.Line}: Unknown unary operator '{unary.Operator}'");
+                    return "error";
+            }
+}
+
+
+
