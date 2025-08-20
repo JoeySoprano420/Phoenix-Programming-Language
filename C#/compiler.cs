@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace PhoenixCompiler
 {
@@ -16359,5 +16360,1375 @@ namespace PhoenixCompiler
     }
 }
 
+// Phoenix ProLang Complete Language Execution Engine
+// Add this complete implementation to the bottom of your CodeGenerator.cs file
 
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace PhoenixCompiler
+{
+    // Phoenix Complete Language Runtime
+    public class PhoenixRuntime
+    {
+        private readonly Dictionary<string, object> globalScope;
+        private readonly Stack<Dictionary<string, object>> scopeStack;
+        private readonly List<Thread> activeThreads;
+        private readonly Dictionary<string, Mutex> mutexes;
+        private readonly PhoenixMemoryManager memoryManager;
+        private readonly PhoenixConcurrencyManager concurrencyManager;
+
+        public PhoenixRuntime()
+        {
+            globalScope = new Dictionary<string, object>();
+            scopeStack = new Stack<Dictionary<string, object>>();
+            activeThreads = new List<Thread>();
+            mutexes = new Dictionary<string, Mutex>();
+            memoryManager = new PhoenixMemoryManager();
+            concurrencyManager = new PhoenixConcurrencyManager();
+        }
+
+        public void ExecuteProgram(ProgramNode program)
+        {
+            Console.WriteLine("🔥 Phoenix ProLang Runtime Starting...");
+
+            try
+            {
+                // Initialize runtime environment
+                InitializeRuntime();
+
+                // Execute all declarations and statements
+                foreach (var declaration in program.Declarations)
+                {
+                    ExecuteDeclaration(declaration);
+                }
+
+                // Find and execute main function
+                ExecuteMainFunction();
+
+                Console.WriteLine("✅ Phoenix Program Execution Complete");
+            }
+            catch (PhoenixRuntimeException ex)
+            {
+                Console.WriteLine($"❌ Phoenix Runtime Error: {ex.Message}");
+            }
+            finally
+            {
+                CleanupRuntime();
+            }
+        }
+
+        private void InitializeRuntime()
+        {
+            // Initialize built-in functions and types
+            globalScope["print"] = new PhoenixBuiltinFunction("print", PrintFunction);
+            globalScope["aloc"] = new PhoenixBuiltinFunction("aloc", AlocFunction);
+            globalScope["free"] = new PhoenixBuiltinFunction("free", FreeFunction);
+            globalScope["trace"] = new PhoenixBuiltinFunction("trace", TraceFunction);
+            globalScope["profile"] = new PhoenixBuiltinFunction("profile", ProfileFunction);
+            globalScope["ping"] = new PhoenixBuiltinFunction("ping", PingFunction);
+            globalScope["log"] = new PhoenixBuiltinFunction("log", LogFunction);
+            globalScope["assert"] = new PhoenixBuiltinFunction("assert", AssertFunction);
+            globalScope["check"] = new PhoenixBuiltinFunction("check", CheckFunction);
+            globalScope["validate"] = new PhoenixBuiltinFunction("validate", ValidateFunction);
+            globalScope["thread"] = new PhoenixBuiltinFunction("thread", ThreadFunction);
+            globalScope["mutex"] = new PhoenixBuiltinFunction("mutex", MutexFunction);
+            globalScope["lock"] = new PhoenixBuiltinFunction("lock", LockFunction);
+            globalScope["unlock"] = new PhoenixBuiltinFunction("unlock", UnlockFunction);
+            globalScope["sleep"] = new PhoenixBuiltinFunction("sleep", SleepFunction);
+            globalScope["wake"] = new PhoenixBuiltinFunction("wake", WakeFunction);
+            globalScope["join"] = new PhoenixBuiltinFunction("join", JoinFunction);
+            globalScope["detach"] = new PhoenixBuiltinFunction("detach", DetachFunction);
+
+            Console.WriteLine("🚀 Phoenix Runtime Initialized");
+        }
+
+        private void ExecuteDeclaration(DeclarationNode declaration)
+        {
+            switch (declaration)
+            {
+                case CapsuleDeclarationNode capsule:
+                    ExecuteCapsuleDeclaration(capsule);
+                    break;
+                case FunctionDeclarationNode function:
+                    ExecuteFunctionDeclaration(function);
+                    break;
+                case VariableDeclarationNode variable:
+                    ExecuteVariableDeclaration(variable);
+                    break;
+                case NamespaceDeclarationNode ns:
+                    ExecuteNamespaceDeclaration(ns);
+                    break;
+                case StructDeclarationNode structDecl:
+                    ExecuteStructDeclaration(structDecl);
+                    break;
+                case EnumDeclarationNode enumDecl:
+                    ExecuteEnumDeclaration(enumDecl);
+                    break;
+            }
+        }
+
+        private void ExecuteCapsuleDeclaration(CapsuleDeclarationNode capsule)
+        {
+            var capsuleType = new PhoenixCapsule(capsule.Name);
+
+            // Process capsule members
+            foreach (var member in capsule.Members)
+            {
+                switch (member)
+                {
+                    case FunctionDeclarationNode func:
+                        capsuleType.AddMethod(func.Name, new PhoenixFunction(func, this));
+                        break;
+                    case VariableDeclarationNode field:
+                        capsuleType.AddField(field.Name, EvaluateExpression(field.Initializer));
+                        break;
+                }
+            }
+
+            globalScope[capsule.Name] = capsuleType;
+            Console.WriteLine($"📦 Capsule '{capsule.Name}' registered");
+        }
+
+        private void ExecuteFunctionDeclaration(FunctionDeclarationNode function)
+        {
+            globalScope[function.Name] = new PhoenixFunction(function, this);
+            Console.WriteLine($"⚡ Function '{function.Name}' registered");
+        }
+
+        private void ExecuteVariableDeclaration(VariableDeclarationNode variable)
+        {
+            object value = null;
+
+            if (variable.Initializer != null)
+            {
+                value = EvaluateExpression(variable.Initializer);
+            }
+            else
+            {
+                value = GetDefaultValue(variable.Type);
+            }
+
+            if (variable.IsStatic)
+            {
+                globalScope[variable.Name] = value;
+            }
+            else
+            {
+                var currentScope = scopeStack.Count > 0 ? scopeStack.Peek() : globalScope;
+                currentScope[variable.Name] = value;
+            }
+
+            Console.WriteLine($"🔧 Variable '{variable.Name}' = {value}");
+        }
+
+        private void ExecuteNamespaceDeclaration(NamespaceDeclarationNode ns)
+        {
+            var namespaceScope = new Dictionary<string, object>();
+            scopeStack.Push(namespaceScope);
+
+            foreach (var member in ns.Members)
+            {
+                ExecuteDeclaration(member);
+            }
+
+            scopeStack.Pop();
+            globalScope[ns.Name] = namespaceScope;
+            Console.WriteLine($"🏷️ Namespace '{ns.Name}' processed");
+        }
+
+        private void ExecuteStructDeclaration(StructDeclarationNode structDecl)
+        {
+            var structType = new PhoenixStruct(structDecl.Name);
+
+            foreach (var field in structDecl.Fields)
+            {
+                structType.AddField(field.Name, field.Type);
+            }
+
+            globalScope[structDecl.Name] = structType;
+            Console.WriteLine($"🧱 Struct '{structDecl.Name}' registered");
+        }
+
+        private void ExecuteEnumDeclaration(EnumDeclarationNode enumDecl)
+        {
+            var enumType = new PhoenixEnum(enumDecl.Name);
+
+            for (int i = 0; i < enumDecl.Values.Count; i++)
+            {
+                enumType.AddValue(enumDecl.Values[i], i);
+                globalScope[$"{enumDecl.Name}.{enumDecl.Values[i]}"] = i;
+            }
+
+            globalScope[enumDecl.Name] = enumType;
+            Console.WriteLine($"🔢 Enum '{enumDecl.Name}' registered");
+        }
+
+        private void ExecuteMainFunction()
+        {
+            if (globalScope.ContainsKey("main") && globalScope["main"] is PhoenixFunction mainFunc)
+            {
+                Console.WriteLine("🎯 Executing main function...");
+                mainFunc.Call(new object[0]);
+            }
+            else
+            {
+                Console.WriteLine("⚠️ No main function found");
+            }
+        }
+
+        public object ExecuteStatement(StatementNode statement)
+        {
+            switch (statement)
+            {
+                case BlockStatementNode block:
+                    return ExecuteBlockStatement(block);
+                case ExpressionStatementNode expr:
+                    return EvaluateExpression(expr.Expression);
+                case IfStatementNode ifStmt:
+                    return ExecuteIfStatement(ifStmt);
+                case LoopStatementNode loop:
+                    return ExecuteLoopStatement(loop);
+                case ReturnStatementNode ret:
+                    return ExecuteReturnStatement(ret);
+                case BreakStatementNode brk:
+                    throw new PhoenixBreakException();
+                case ContinueStatementNode cont:
+                    throw new PhoenixContinueException();
+                case TryStatementNode tryStmt:
+                    return ExecuteTryStatement(tryStmt);
+                case ThrowStatementNode throwStmt:
+                    return ExecuteThrowStatement(throwStmt);
+                default:
+                    throw new PhoenixRuntimeException($"Unknown statement type: {statement.GetType().Name}");
+            }
+        }
+
+        private object ExecuteBlockStatement(BlockStatementNode block)
+        {
+            var blockScope = new Dictionary<string, object>();
+            scopeStack.Push(blockScope);
+
+            object result = null;
+
+            try
+            {
+                foreach (var statement in block.Statements)
+                {
+                    result = ExecuteStatement(statement);
+                }
+            }
+            finally
+            {
+                scopeStack.Pop();
+            }
+
+            return result;
+        }
+
+        private object ExecuteIfStatement(IfStatementNode ifStmt)
+        {
+            var condition = EvaluateExpression(ifStmt.Condition);
+
+            if (IsTrue(condition))
+            {
+                return ExecuteStatement(ifStmt.ThenStatement);
+            }
+            else if (ifStmt.ElseStatement != null)
+            {
+                return ExecuteStatement(ifStmt.ElseStatement);
+            }
+
+            return null;
+        }
+
+        private object ExecuteLoopStatement(LoopStatementNode loop)
+        {
+            object result = null;
+
+            while (true)
+            {
+                var condition = EvaluateExpression(loop.Condition);
+                if (!IsTrue(condition))
+                    break;
+
+                try
+                {
+                    result = ExecuteStatement(loop.Body);
+                }
+                catch (PhoenixBreakException)
+                {
+                    break;
+                }
+                catch (PhoenixContinueException)
+                {
+                    continue;
+                }
+            }
+
+            return result;
+        }
+
+        private object ExecuteReturnStatement(ReturnStatementNode ret)
+        {
+            var value = ret.Expression != null ? EvaluateExpression(ret.Expression) : null;
+            throw new PhoenixReturnException(value);
+        }
+
+        private object ExecuteTryStatement(TryStatementNode tryStmt)
+        {
+            try
+            {
+                return ExecuteStatement(tryStmt.TryBlock);
+            }
+            catch (PhoenixException ex)
+            {
+                foreach (var catchClause in tryStmt.CatchClauses)
+                {
+                    if (IsExceptionMatch(ex, catchClause.ExceptionType))
+                    {
+                        var catchScope = new Dictionary<string, object>
+                        {
+                            [catchClause.VariableName] = ex
+                        };
+
+                        scopeStack.Push(catchScope);
+
+                        try
+                        {
+                            return ExecuteStatement(catchClause.Body);
+                        }
+                        finally
+                        {
+                            scopeStack.Pop();
+                        }
+                    }
+                }
+                throw;
+            }
+        }
+
+        private object ExecuteThrowStatement(ThrowStatementNode throwStmt)
+        {
+            var exception = EvaluateExpression(throwStmt.Expression);
+            throw new PhoenixUserException(exception);
+        }
+
+        public object EvaluateExpression(ExpressionNode expression)
+        {
+            if (expression == null) return null;
+
+            switch (expression)
+            {
+                case LiteralExpressionNode literal:
+                    return EvaluateLiteral(literal);
+                case IdentifierExpressionNode identifier:
+                    return EvaluateIdentifier(identifier);
+                case BinaryExpressionNode binary:
+                    return EvaluateBinaryExpression(binary);
+                case UnaryExpressionNode unary:
+                    return EvaluateUnaryExpression(unary);
+                case FunctionCallExpressionNode call:
+                    return EvaluateFunctionCall(call);
+                case MemberAccessExpressionNode member:
+                    return EvaluateMemberAccess(member);
+                case ArrayAccessExpressionNode array:
+                    return EvaluateArrayAccess(array);
+                case AssignmentExpressionNode assignment:
+                    return EvaluateAssignment(assignment);
+                case NewExpressionNode newExpr:
+                    return EvaluateNewExpression(newExpr);
+                default:
+                    throw new PhoenixRuntimeException($"Unknown expression type: {expression.GetType().Name}");
+            }
+        }
+
+        private object EvaluateLiteral(LiteralExpressionNode literal)
+        {
+            switch (literal.Type)
+            {
+                case TokenType.Integer:
+                    return Convert.ToInt32(literal.Value);
+                case TokenType.Float:
+                    return Convert.ToDouble(literal.Value);
+                case TokenType.Boolean:
+                    return Convert.ToBoolean(literal.Value);
+                case TokenType.String:
+                    return literal.Value.ToString();
+                case TokenType.Character:
+                    return Convert.ToChar(literal.Value);
+                case TokenType.Null:
+                    return null;
+                default:
+                    return literal.Value;
+            }
+        }
+
+        private object EvaluateIdentifier(IdentifierExpressionNode identifier)
+        {
+            // Search through scope stack
+            for (int i = scopeStack.Count - 1; i >= 0; i--)
+            {
+                var scope = scopeStack.ElementAt(i);
+                if (scope.ContainsKey(identifier.Name))
+                {
+                    return scope[identifier.Name];
+                }
+            }
+
+            // Search global scope
+            if (globalScope.ContainsKey(identifier.Name))
+            {
+                return globalScope[identifier.Name];
+            }
+
+            throw new PhoenixRuntimeException($"Undefined variable: {identifier.Name}");
+        }
+
+        private object EvaluateBinaryExpression(BinaryExpressionNode binary)
+        {
+            var left = EvaluateExpression(binary.Left);
+            var right = EvaluateExpression(binary.Right);
+
+            return binary.Operator switch
+            {
+                TokenType.Plus => Add(left, right),
+                TokenType.Minus => Subtract(left, right),
+                TokenType.Multiply => Multiply(left, right),
+                TokenType.Divide => Divide(left, right),
+                TokenType.Modulo => Modulo(left, right),
+                TokenType.Equal => AreEqual(left, right),
+                TokenType.NotEqual => !AreEqual(left, right),
+                TokenType.Less => IsLess(left, right),
+                TokenType.Greater => IsGreater(left, right),
+                TokenType.LessEqual => IsLessEqual(left, right),
+                TokenType.GreaterEqual => IsGreaterEqual(left, right),
+                TokenType.And => IsTrue(left) && IsTrue(right),
+                TokenType.Or => IsTrue(left) || IsTrue(right),
+                _ => throw new PhoenixRuntimeException($"Unknown binary operator: {binary.Operator}")
+            };
+        }
+
+        private object EvaluateUnaryExpression(UnaryExpressionNode unary)
+        {
+            var operand = EvaluateExpression(unary.Operand);
+
+            return unary.Operator switch
+            {
+                TokenType.Not => !IsTrue(operand),
+                TokenType.Minus => Negate(operand),
+                TokenType.Plus => operand,
+                _ => throw new PhoenixRuntimeException($"Unknown unary operator: {unary.Operator}")
+            };
+        }
+
+        private object EvaluateFunctionCall(FunctionCallExpressionNode call)
+        {
+            var function = EvaluateExpression(call.Function);
+
+            var arguments = call.Arguments.Select(arg => EvaluateExpression(arg)).ToArray();
+
+            if (function is PhoenixFunction phoenixFunc)
+            {
+                return phoenixFunc.Call(arguments);
+            }
+            else if (function is PhoenixBuiltinFunction builtin)
+            {
+                return builtin.Call(arguments);
+            }
+            else
+            {
+                throw new PhoenixRuntimeException($"Cannot call non-function value");
+            }
+        }
+
+        private object EvaluateMemberAccess(MemberAccessExpressionNode member)
+        {
+            var obj = EvaluateExpression(member.Object);
+
+            if (obj is PhoenixCapsule capsule)
+            {
+                return capsule.GetMember(member.MemberName);
+            }
+            else if (obj is PhoenixStruct structObj)
+            {
+                return structObj.GetField(member.MemberName);
+            }
+            else if (obj is Dictionary<string, object> dict)
+            {
+                return dict.ContainsKey(member.MemberName) ? dict[member.MemberName] : null;
+            }
+
+            throw new PhoenixRuntimeException($"Cannot access member '{member.MemberName}' on {obj?.GetType().Name}");
+        }
+
+        private object EvaluateArrayAccess(ArrayAccessExpressionNode array)
+        {
+            var arrayObj = EvaluateExpression(array.Array);
+            var index = EvaluateExpression(array.Index);
+
+            if (arrayObj is Array arr && index is int idx)
+            {
+                return arr.GetValue(idx);
+            }
+            else if (arrayObj is List<object> list && index is int listIdx)
+            {
+                return list[listIdx];
+            }
+
+            throw new PhoenixRuntimeException("Invalid array access");
+        }
+
+        private object EvaluateAssignment(AssignmentExpressionNode assignment)
+        {
+            var value = EvaluateExpression(assignment.Right);
+
+            if (assignment.Left is IdentifierExpressionNode identifier)
+            {
+                SetVariable(identifier.Name, value);
+                return value;
+            }
+            else if (assignment.Left is MemberAccessExpressionNode member)
+            {
+                var obj = EvaluateExpression(member.Object);
+                SetMember(obj, member.MemberName, value);
+                return value;
+            }
+            else if (assignment.Left is ArrayAccessExpressionNode array)
+            {
+                var arrayObj = EvaluateExpression(array.Array);
+                var index = EvaluateExpression(array.Index);
+                SetArrayElement(arrayObj, index, value);
+                return value;
+            }
+
+            throw new PhoenixRuntimeException("Invalid assignment target");
+        }
+
+        private object EvaluateNewExpression(NewExpressionNode newExpr)
+        {
+            var typeName = GetTypeName(newExpr.Type);
+            var arguments = newExpr.Arguments.Select(arg => EvaluateExpression(arg)).ToArray();
+
+            if (globalScope.ContainsKey(typeName))
+            {
+                var type = globalScope[typeName];
+
+                if (type is PhoenixCapsule capsuleType)
+                {
+                    return new PhoenixCapsuleInstance(capsuleType);
+                }
+                else if (type is PhoenixStruct structType)
+                {
+                    return new PhoenixStructInstance(structType);
+                }
+            }
+
+            return memoryManager.AllocateObject(typeName, arguments);
+        }
+
+        // Built-in function implementations
+        private object PrintFunction(object[] args)
+        {
+            var output = string.Join(" ", args.Select(arg => arg?.ToString() ?? "null"));
+            Console.WriteLine(output);
+            return null;
+        }
+
+        private object AlocFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is int size)
+            {
+                return memoryManager.Allocate(size);
+            }
+            throw new PhoenixRuntimeException("aloc() requires size parameter");
+        }
+
+        private object FreeFunction(object[] args)
+        {
+            if (args.Length > 0)
+            {
+                memoryManager.Free(args[0]);
+                return null;
+            }
+            throw new PhoenixRuntimeException("free() requires memory reference");
+        }
+
+        private object TraceFunction(object[] args)
+        {
+            var message = args.Length > 0 ? args[0]?.ToString() : "TRACE";
+            Console.WriteLine($"🔍 TRACE: {message} [{DateTime.Now:HH:mm:ss.fff}]");
+            return null;
+        }
+
+        private object ProfileFunction(object[] args)
+        {
+            var action = args.Length > 0 ? args[0]?.ToString() : "profile";
+            Console.WriteLine($"📊 PROFILE: {action}");
+            return null;
+        }
+
+        private object PingFunction(object[] args)
+        {
+            Console.WriteLine($"🏓 PING: {DateTime.Now:HH:mm:ss.fff}");
+            return DateTime.Now.Millisecond;
+        }
+
+        private object LogFunction(object[] args)
+        {
+            var level = args.Length > 0 ? args[0]?.ToString() : "INFO";
+            var message = args.Length > 1 ? args[1]?.ToString() : "";
+            Console.WriteLine($"📝 {level}: {message}");
+            return null;
+        }
+
+        private object AssertFunction(object[] args)
+        {
+            if (args.Length > 0)
+            {
+                var condition = IsTrue(args[0]);
+                if (!condition)
+                {
+                    var message = args.Length > 1 ? args[1]?.ToString() : "Assertion failed";
+                    throw new PhoenixRuntimeException($"ASSERT: {message}");
+                }
+            }
+            return null;
+        }
+
+        private object CheckFunction(object[] args)
+        {
+            return args.Length > 0 ? IsTrue(args[0]) : false;
+        }
+
+        private object ValidateFunction(object[] args)
+        {
+            foreach (var arg in args)
+            {
+                if (!IsTrue(arg))
+                {
+                    throw new PhoenixRuntimeException($"Validation failed for: {arg}");
+                }
+            }
+            return true;
+        }
+
+        private object ThreadFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is PhoenixFunction func)
+            {
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        func.Call(args.Skip(1).ToArray());
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Thread error: {ex.Message}");
+                    }
+                });
+
+                activeThreads.Add(thread);
+                thread.Start();
+                return new PhoenixThread(thread);
+            }
+            throw new PhoenixRuntimeException("thread() requires function parameter");
+        }
+
+        private object MutexFunction(object[] args)
+        {
+            var name = args.Length > 0 ? args[0]?.ToString() : Guid.NewGuid().ToString();
+            var mutex = new Mutex(false, name);
+            mutexes[name] = mutex;
+            return new PhoenixMutex(mutex, name);
+        }
+
+        private object LockFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is PhoenixMutex phoenixMutex)
+            {
+                phoenixMutex.Lock();
+                return null;
+            }
+            throw new PhoenixRuntimeException("lock() requires mutex parameter");
+        }
+
+        private object UnlockFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is PhoenixMutex phoenixMutex)
+            {
+                phoenixMutex.Unlock();
+                return null;
+            }
+            throw new PhoenixRuntimeException("unlock() requires mutex parameter");
+        }
+
+        private object SleepFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is int milliseconds)
+            {
+                Thread.Sleep(milliseconds);
+                return null;
+            }
+            throw new PhoenixRuntimeException("sleep() requires milliseconds parameter");
+        }
+
+        private object WakeFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is PhoenixThread phoenixThread)
+            {
+                phoenixThread.Wake();
+                return null;
+            }
+            throw new PhoenixRuntimeException("wake() requires thread parameter");
+        }
+
+        private object JoinFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is PhoenixThread phoenixThread)
+            {
+                phoenixThread.Join();
+                return null;
+            }
+            throw new PhoenixRuntimeException("join() requires thread parameter");
+        }
+
+        private object DetachFunction(object[] args)
+        {
+            if (args.Length > 0 && args[0] is PhoenixThread phoenixThread)
+            {
+                phoenixThread.Detach();
+                return null;
+            }
+            throw new PhoenixRuntimeException("detach() requires thread parameter");
+        }
+
+        // Helper methods
+        private object GetDefaultValue(TypeNode type)
+        {
+            var typeName = GetTypeName(type);
+            return typeName switch
+            {
+                "int" => 0,
+                "float" => 0.0,
+                "bool" => false,
+                "char" => '\0',
+                "string" => "",
+                _ => null
+            };
+        }
+
+        private string GetTypeName(TypeNode type)
+        {
+            if (type is PrimitiveTypeNode primitive)
+                return primitive.Name;
+            return "object";
+        }
+
+        private bool IsTrue(object value)
+        {
+            return value switch
+            {
+                bool b => b,
+                int i => i != 0,
+                double d => d != 0.0,
+                string s => !string.IsNullOrEmpty(s),
+                null => false,
+                _ => true
+            };
+        }
+
+        private object Add(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) => l + r,
+                (double l, double r) => l + r,
+                (int l, double r) => l + r,
+                (double l, int r) => l + r,
+                (string l, string r) => l + r,
+                _ => throw new PhoenixRuntimeException($"Cannot add {left?.GetType()} and {right?.GetType()}")
+            };
+        }
+
+        private object Subtract(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) => l - r,
+                (double l, double r) => l - r,
+                (int l, double r) => l - r,
+                (double l, int r) => l - r,
+                _ => throw new PhoenixRuntimeException($"Cannot subtract {right?.GetType()} from {left?.GetType()}")
+            };
+        }
+
+        private object Multiply(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) => l * r,
+                (double l, double r) => l * r,
+                (int l, double r) => l * r,
+                (double l, int r) => l * r,
+                _ => throw new PhoenixRuntimeException($"Cannot multiply {left?.GetType()} and {right?.GetType()}")
+            };
+        }
+
+        private object Divide(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) when r != 0 => l / r,
+                (double l, double r) when r != 0.0 => l / r,
+                (int l, double r) when r != 0.0 => l / r,
+                (double l, int r) when r != 0 => l / r,
+                _ => throw new PhoenixRuntimeException("Division by zero or invalid operands")
+            };
+        }
+
+        private object Modulo(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) when r != 0 => l % r,
+                _ => throw new PhoenixRuntimeException("Invalid modulo operation")
+            };
+        }
+
+        private object Negate(object operand)
+        {
+            return operand switch
+            {
+                int i => -i,
+                double d => -d,
+                _ => throw new PhoenixRuntimeException($"Cannot negate {operand?.GetType()}")
+            };
+        }
+
+        private bool AreEqual(object left, object right)
+        {
+            return Equals(left, right);
+        }
+
+        private bool IsLess(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) => l < r,
+                (double l, double r) => l < r,
+                (int l, double r) => l < r,
+                (double l, int r) => l < r,
+                _ => false
+            };
+        }
+
+        private bool IsGreater(object left, object right)
+        {
+            return (left, right) switch
+            {
+                (int l, int r) => l > r,
+                (double l, double r) => l > r,
+                (int l, double r) => l > r,
+                (double l, int r) => l > r,
+                _ => false
+            };
+        }
+
+        private bool IsLessEqual(object left, object right)
+        {
+            return IsLess(left, right) || AreEqual(left, right);
+        }
+
+        private bool IsGreaterEqual(object left, object right)
+        {
+            return IsGreater(left, right) || AreEqual(left, right);
+        }
+
+        private void SetVariable(string name, object value)
+        {
+            // Try to find and update in scope stack
+            for (int i = scopeStack.Count - 1; i >= 0; i--)
+            {
+                var scope = scopeStack.ElementAt(i);
+                if (scope.ContainsKey(name))
+                {
+                    scope[name] = value;
+                    return;
+                }
+            }
+
+            // Set in global scope
+            globalScope[name] = value;
+        }
+
+        private void SetMember(object obj, string memberName, object value)
+        {
+            if (obj is PhoenixCapsule capsule)
+            {
+                capsule.SetMember(memberName, value);
+            }
+            else if (obj is PhoenixStruct structObj)
+            {
+                structObj.SetField(memberName, value);
+            }
+            else if (obj is Dictionary<string, object> dict)
+            {
+                dict[memberName] = value;
+            }
+            else
+            {
+                throw new PhoenixRuntimeException($"Cannot set member on {obj?.GetType()}");
+            }
+        }
+
+        private void SetArrayElement(object arrayObj, object index, object value)
+        {
+            if (arrayObj is Array arr && index is int idx)
+            {
+                arr.SetValue(value, idx);
+            }
+            else if (arrayObj is List<object> list && index is int listIdx)
+            {
+                if (listIdx < list.Count)
+                    list[listIdx] = value;
+                else
+                    throw new PhoenixRuntimeException("Index out of bounds");
+            }
+            else
+            {
+                throw new PhoenixRuntimeException("Invalid array assignment");
+            }
+        }
+
+        private bool IsExceptionMatch(PhoenixException exception, TypeNode exceptionType)
+        {
+            var typeName = GetTypeName(exceptionType);
+            return exception.GetType().Name.Contains(typeName);
+        }
+
+        private void CleanupRuntime()
+        {
+            // Clean up threads
+            foreach (var thread in activeThreads)
+            {
+                if (thread.IsAlive)
+                {
+                    thread.Join(1000); // Wait up to 1 second
+                }
+            }
+
+            // Clean up mutexes
+            foreach (var mutex in mutexes.Values)
+            {
+                mutex.Dispose();
+            }
+
+            // Clean up memory
+            memoryManager.Cleanup();
+
+            Console.WriteLine("🧹 Phoenix Runtime Cleanup Complete");
+        }
+    }
+
+    // Phoenix Types and Supporting Classes
+    public class PhoenixFunction
+    {
+        private readonly FunctionDeclarationNode declaration;
+        private readonly PhoenixRuntime runtime;
+
+        public PhoenixFunction(FunctionDeclarationNode declaration, PhoenixRuntime runtime)
+        {
+            this.declaration = declaration;
+            this.runtime = runtime;
+        }
+
+        public object Call(object[] arguments)
+        {
+            if (arguments.Length != declaration.Parameters.Count)
+            {
+                throw new PhoenixRuntimeException($"Function {declaration.Name} expects {declaration.Parameters.Count} arguments, got {arguments.Length}");
+            }
+
+            var functionScope = new Dictionary<string, object>();
+
+            // Bind parameters
+            for (int i = 0; i < declaration.Parameters.Count; i++)
+            {
+                functionScope[declaration.Parameters[i].Name] = arguments[i];
+            }
+
+            runtime.scopeStack.Push(functionScope);
+
+            try
+            {
+                return runtime.ExecuteStatement(declaration.Body);
+            }
+            catch (PhoenixReturnException ret)
+            {
+                return ret.Value;
+            }
+            finally
+            {
+                runtime.scopeStack.Pop();
+            }
+        }
+    }
+
+    public class PhoenixBuiltinFunction
+    {
+        public string Name { get; }
+        private readonly Func<object[], object> implementation;
+
+        public PhoenixBuiltinFunction(string name, Func<object[], object> implementation)
+        {
+            Name = name;
+            this.implementation = implementation;
+        }
+
+        public object Call(object[] arguments)
+        {
+            return implementation(arguments);
+        }
+    }
+
+    public class PhoenixCapsule
+    {
+        public string Name { get; }
+        private readonly Dictionary<string, object> fields;
+        private readonly Dictionary<string, PhoenixFunction> methods;
+
+        public PhoenixCapsule(string name)
+        {
+            Name = name;
+            fields = new Dictionary<string, object>();
+            methods = new Dictionary<string, PhoenixFunction>();
+        }
+
+        public void AddField(string name, object value)
+        {
+            fields[name] = value;
+        }
+
+        public void AddMethod(string name, PhoenixFunction method)
+        {
+            methods[name] = method;
+        }
+
+        public object GetMember(string name)
+        {
+            if (fields.ContainsKey(name))
+                return fields[name];
+            if (methods.ContainsKey(name))
+                return methods[name];
+            throw new PhoenixRuntimeException($"Member '{name}' not found in capsule '{Name}'");
+        }
+
+        public void SetMember(string name, object value)
+        {
+            if (fields.ContainsKey(name))
+            {
+                fields[name] = value;
+            }
+            else
+            {
+                throw new PhoenixRuntimeException($"Field '{name}' not found in capsule '{Name}'");
+            }
+        }
+    }
+
+    public class PhoenixCapsuleInstance
+    {
+        public PhoenixCapsule Type { get; }
+        private readonly Dictionary<string, object> instanceFields;
+
+        public PhoenixCapsuleInstance(PhoenixCapsule type)
+        {
+            Type = type;
+            instanceFields = new Dictionary<string, object>();
+        }
+    }
+
+    public class PhoenixStruct
+    {
+        public string Name { get; }
+        private readonly Dictionary<string, TypeNode> fieldTypes;
+
+        public PhoenixStruct(string name)
+        {
+            Name = name;
+            fieldTypes = new Dictionary<string, TypeNode>();
+        }
+
+        public void AddField(string name, TypeNode type)
+        {
+            fieldTypes[name] = type;
+        }
+
+        public object GetField(string name)
+        {
+            throw new NotImplementedException();
+        }
+
+        public void SetField(string name, object value)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
+    public class PhoenixStructInstance
+    {
+        public PhoenixStruct Type { get; }
+        private readonly Dictionary<string, object> fields;
+
+        public PhoenixStructInstance(PhoenixStruct type)
+        {
+            Type = type;
+            fields = new Dictionary<string, object>();
+        }
+    }
+
+    public class PhoenixEnum
+    {
+        public string Name { get; }
+        private readonly Dictionary<string, int> values;
+
+        public PhoenixEnum(string name)
+        {
+            Name = name;
+            values = new Dictionary<string, int>();
+        }
+
+        public void AddValue(string name, int value)
+        {
+            values[name] = value;
+        }
+    }
+
+    public class PhoenixThread
+    {
+        private readonly Thread thread;
+
+        public PhoenixThread(Thread thread)
+        {
+            this.thread = thread;
+        }
+
+        public void Wake()
+        {
+            // Implementation for waking thread
+        }
+
+        public void Join()
+        {
+            thread.Join();
+        }
+
+        public void Detach()
+        {
+            // Implementation for detaching thread
+        }
+    }
+
+    public class PhoenixMutex
+    {
+        private readonly Mutex mutex;
+        public string Name { get; }
+
+        public PhoenixMutex(Mutex mutex, string name)
+        {
+            this.mutex = mutex;
+            Name = name;
+        }
+
+        public void Lock()
+        {
+            mutex.WaitOne();
+        }
+
+        public void Unlock()
+        {
+            mutex.ReleaseMutex();
+        }
+    }
+
+    public class PhoenixMemoryManager
+    {
+        private readonly List<object> allocatedObjects;
+
+        public PhoenixMemoryManager()
+        {
+            allocatedObjects = new List<object>();
+        }
+
+        public object Allocate(int size)
+        {
+            var memory = new byte[size];
+            allocatedObjects.Add(memory);
+            return memory;
+        }
+
+        public void Free(object obj)
+        {
+            allocatedObjects.Remove(obj);
+        }
+
+        public object AllocateObject(string typeName, object[] arguments)
+        {
+            var obj = Activator.CreateInstance(typeof(object));
+            allocatedObjects.Add(obj);
+            return obj;
+        }
+
+        public void Cleanup()
+        {
+            allocatedObjects.Clear();
+        }
+    }
+
+    public class PhoenixConcurrencyManager
+    {
+        private readonly Dictionary<string, object> synchronizedObjects;
+
+        public PhoenixConcurrencyManager()
+        {
+            synchronizedObjects = new Dictionary<string, object>();
+        }
+    }
+
+    // Exception Types
+    public abstract class PhoenixException : Exception
+    {
+        protected PhoenixException(string message) : base(message) { }
+    }
+
+    public class PhoenixRuntimeException : PhoenixException
+    {
+        public PhoenixRuntimeException(string message) : base(message) { }
+    }
+
+    public class PhoenixReturnException : PhoenixException
+    {
+        public object Value { get; }
+
+        public PhoenixReturnException(object value) : base("Return")
+        {
+            Value = value;
+        }
+    }
+
+    public class PhoenixBreakException : PhoenixException
+    {
+        public PhoenixBreakException() : base("Break") { }
+    }
+
+    public class PhoenixContinueException : PhoenixException
+    {
+        public PhoenixContinueException() : base("Continue") { }
+    }
+
+    public class PhoenixUserException : PhoenixException
+    {
+        public object UserValue { get; }
+
+        public PhoenixUserException(object value) : base("User Exception")
+        {
+            UserValue = value;
+        }
+    }
+
+    // Phoenix Language Runner Entry Point
+    public class PhoenixLanguageRunner
+    {
+        public static void RunPhoenixProgram(string sourceCode)
+        {
+            try
+            {
+                Console.WriteLine("🔥 Phoenix ProLang - Capsule-Driven Execution Engine");
+                Console.WriteLine("=====================================================");
+
+                // Compile the program
+                var lexer = new Lexer();
+                var parser = new Parser();
+
+                var tokens = lexer.Tokenize(sourceCode);
+                var ast = parser.Parse(tokens);
+
+                // Execute the program
+                var runtime = new PhoenixRuntime();
+                runtime.ExecuteProgram(ast);
+
+                Console.WriteLine("\n✅ Phoenix Program Execution Successful!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n❌ Phoenix Execution Error: {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"Inner: {ex.InnerException.Message}");
+                }
+            }
+        }
+
+        // Example Phoenix Program
+        public static void RunExampleProgram()
+        {
+            string exampleCode = @"
+                // Phoenix ProLang Example Program
+                capsule Calculator {
+                    int value = 0;
+                    
+                    int add(int a, int b) {
+                        return a + b;
+                    }
+                    
+                    int multiply(int a, int b) {
+                        return a * b;
+                    }
+                }
+                
+                int main() {
+                    // Demonstrate Phoenix language features
+                    trace(""Starting Phoenix calculation"");
+                    
+                    Calculator calc = new Calculator();
+                    
+                    int result = calc.add(5, 3);
+                    print(""5 + 3 ="", result);
+                    
+                    result = calc.multiply(4, 6);
+                    print(""4 * 6 ="", result);
+                    
+                    // Demonstrate safety features
+                    assert(result > 0, ""Result should be positive"");
+                    
+                    // Demonstrate concurrency
+                    thread worker = thread(() => {
+                        trace(""Worker thread executing"");
+                        sleep(100);
+                        trace(""Worker thread complete"");
+                    });
+                    
+                    join(worker);
+                    
+                    profile(""Calculation complete"");
+                    return 0;
+                }
+            ";
+
+            RunPhoenixProgram(exampleCode);
+        }
+    }
+}
+
+// Add this to enable complete Phoenix language execution
+// Usage: PhoenixLanguageRunner.RunExampleProgram();
 
